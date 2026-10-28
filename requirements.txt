@@ -1,0 +1,6 @@
+numpy>=2.0
+sounddevice>=0.5
+PyAudioWPatch>=0.2.12
+keyboard>=0.13.5
+customtkinter>=5.2
+imageio-ffmpeg>=0.6

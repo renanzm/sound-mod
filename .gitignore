@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+config.json
+clips/*
+!clips/.gitkeep
+build/
+dist/
+*.spec
