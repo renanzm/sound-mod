@@ -1,7 +1,12 @@
 import json
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# empacotado (PyInstaller): config e clipes ficam ao lado do .exe
+if getattr(sys, "frozen", False):
+    ROOT = Path(sys.executable).resolve().parent
+else:
+    ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.json"
 CLIPS_DIR = ROOT / "clips"
 CLIP_PATH = CLIPS_DIR / "last_clip.mp3"
@@ -37,4 +42,5 @@ def load():
 
 
 def save(cfg):
+    CLIPS_DIR.mkdir(exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")

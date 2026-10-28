@@ -22,3 +22,11 @@ python -m venv .venv
 
 O audio e codificado/decodificado com um ffmpeg embutido (pacote `imageio-ffmpeg`), sem instalar nada a mais.
 Configuracoes ficam em `config.json`.
+
+## Gerar executável (.exe)
+```
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+Gera `dist\SoundMod\SoundMod.exe` (pasta completa, inicia rápido; distribua a pasta inteira).
+Use `build.ps1 -OneFile` para um único `.exe` (abre mais devagar). O ffmpeg vai embutido.
+`config.json` e `clips\` são criados ao lado do `.exe`. O VB-CABLE continua sendo necessário.
