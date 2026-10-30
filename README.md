@@ -17,8 +17,10 @@ python -m venv .venv
 ## Como usar
 1. **Microfone real**: seu mic fisico. **Saida -> cabo virtual**: `CABLE Input`.
 2. No Discord/jogo, escolha **CABLE Output** como microfone.
-3. Atribua arquivos (mp3, wav, ogg, flac...) e teclas aos slots (clique no botao da tecla e pressione a nova).
-4. **F5** salva os ultimos N segundos do audio do PC em `clips/last_clip.mp3`; **F6** toca o clipe. **F12** para tudo.
+3. Atribua arquivos (mp3, wav, ogg, flac...) aos slots. Cada botao de tecla e dividido: **▶ F1** toca, **✎** muda a tecla.
+4. Em cada som: barra de progresso (arraste para avancar/voltar), volume, ▶ tocar, ⏸ pausar/continuar, ■ parar.
+5. **F5** salva os ultimos N segundos do audio do PC em `clips/last_clip.mp3` e mostra a forma de onda; arraste as alcas laranjas
+   para escolher o trecho que toca. **F6** toca o trecho. **F12** para tudo.
 
 O audio e codificado/decodificado com um ffmpeg embutido (pacote `imageio-ffmpeg`), sem instalar nada a mais.
 Configuracoes ficam em `config.json`.

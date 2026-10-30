@@ -31,17 +31,22 @@ def _extra(index):
     return sd.WasapiSettings(auto_convert=True) if "WASAPI" in api else None
 
 
-class _Voice:
-    __slots__ = ("data", "pos", "gain")
+class _Channel:
+    """Um som carregado com posicao propria. Toca apenas o trecho [start, end)."""
+    __slots__ = ("data", "pos", "start", "end", "gain", "playing")
 
     def __init__(self, data, gain):
-        self.data, self.pos, self.gain = data, 0, gain
+        self.data = data
+        self.pos = self.start = 0
+        self.end = len(data)
+        self.gain = gain
+        self.playing = False
 
 
 class Engine:
     def __init__(self):
         self.lock = threading.Lock()
-        self.voices = []
+        self.channels = {}  # id (slot ou "clip") -> _Channel
         self.cache = {}
         self.mic_buf = deque()
         self.mic_frames = 0
@@ -60,21 +65,87 @@ class Engine:
             self.cache[key] = decode(path)
         return self.cache[key]
 
-    def play(self, path, volume=1.0):
-        data = self.load(path)
-        with self.lock:
-            self.voices.append(_Voice(data, volume))
-
-    def stop_all(self):
-        with self.lock:
-            self.voices.clear()
-
     def invalidate(self, path):
         self.cache.pop(str(path), None)
 
+    # ---- canais ----
+    def set_sound(self, cid, path, gain=1.0):
+        """Carrega (decodifica se preciso) e associa ao canal, parado. Retorna a duracao em s."""
+        data = self.load(path)
+        with self.lock:
+            self.channels[cid] = _Channel(data, gain)
+        return len(data) / SR
+
+    def remove(self, cid):
+        with self.lock:
+            self.channels.pop(cid, None)
+
+    def has(self, cid):
+        return cid in self.channels
+
+    def play(self, cid):
+        """Se ja estiver tocando, recomeca; senao continua de onde parou."""
+        with self.lock:
+            ch = self.channels.get(cid)
+            if ch is None:
+                return False
+            if ch.playing or not ch.start <= ch.pos < ch.end:
+                ch.pos = ch.start
+            ch.playing = True
+            return True
+
+    def pause(self, cid):
+        """Alterna pausa/continuar (nao faz nada se estiver parado no inicio)."""
+        with self.lock:
+            ch = self.channels.get(cid)
+            if ch and (ch.playing or ch.pos != ch.start):
+                ch.playing = not ch.playing
+
+    def stop(self, cid):
+        with self.lock:
+            ch = self.channels.get(cid)
+            if ch:
+                ch.playing = False
+                ch.pos = ch.start
+
+    def stop_all(self):
+        with self.lock:
+            for ch in self.channels.values():
+                ch.playing = False
+                ch.pos = ch.start
+
+    def seek(self, cid, seconds):
+        with self.lock:
+            ch = self.channels.get(cid)
+            if ch:
+                ch.pos = min(max(int(seconds * SR), ch.start), ch.end - 1)
+
+    def set_gain(self, cid, gain):
+        with self.lock:
+            ch = self.channels.get(cid)
+            if ch:
+                ch.gain = gain
+
+    def set_range(self, cid, start_s, end_s):
+        with self.lock:
+            ch = self.channels.get(cid)
+            if ch:
+                n = len(ch.data)
+                ch.start = min(max(int(start_s * SR), 0), n - 1)
+                ch.end = min(max(int(end_s * SR), ch.start + 1), n)
+                if not ch.start <= ch.pos < ch.end:
+                    ch.pos = ch.start
+
+    def state(self, cid):
+        """(posicao_s, duracao_total_s, tocando) ou None."""
+        ch = self.channels.get(cid)
+        if ch is None:
+            return None
+        return ch.pos / SR, len(ch.data) / SR, ch.playing
+
     # ---- streams ----
-    def start(self, mic_idx, out_idx, mon_idx):
-        self.stop()
+    def open(self, mic_idx, out_idx, mon_idx):
+        self.close()
         if out_idx is None:
             raise RuntimeError("Selecione o dispositivo de saida (cabo virtual).")
         try:
@@ -93,10 +164,10 @@ class Engine:
             for s in self.streams:
                 s.start()
         except Exception:
-            self.stop()
+            self.close()
             raise
 
-    def stop(self):
+    def close(self):
         for s in self.streams:
             try:
                 s.stop()
@@ -123,14 +194,15 @@ class Engine:
     def _render_sounds(self, frames):
         mix = np.zeros((frames, 2), dtype=np.float32)
         with self.lock:
-            alive = []
-            for v in self.voices:
-                n = min(frames, len(v.data) - v.pos)
-                mix[:n] += v.data[v.pos:v.pos + n] * v.gain
-                v.pos += n
-                if v.pos < len(v.data):
-                    alive.append(v)
-            self.voices = alive
+            for ch in self.channels.values():
+                if not ch.playing:
+                    continue
+                n = min(frames, ch.end - ch.pos)
+                mix[:n] += ch.data[ch.pos:ch.pos + n] * ch.gain
+                ch.pos += n
+                if ch.pos >= ch.end:
+                    ch.playing = False
+                    ch.pos = ch.start
         return mix * self.master
 
     def _out_cb(self, outdata, frames, t, status):

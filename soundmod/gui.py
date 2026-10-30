@@ -1,41 +1,89 @@
 import threading
-import tkinter as tk
+import time
 from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
 
 from . import config
+from .codec import SR
 from .engine import Engine, wasapi_devices
 from .hotkeys import HotkeyManager, capture_key
 from .recorder import LoopbackRecorder, loopback_names
+from .widgets import KeyButton, ScrollFrame, Waveform
 
 AUDIO_TYPES = [("Audio", "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.wma"), ("Todos", "*.*")]
 NONE = "(nenhum)"
+CLIP = "clip"  # id do canal do clipe no engine
 
 
-class ScrollFrame(ctk.CTkFrame):
-    """Frame rolavel simples (CTkScrollableFrame trava no Python 3.15)."""
+def mmss(t):
+    return f"{int(t // 60)}:{int(t % 60):02d}"
 
-    def __init__(self, master):
-        super().__init__(master, fg_color="transparent")
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-        bg = self._apply_appearance_mode(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
-        self.canvas = tk.Canvas(self, highlightthickness=0, bg=bg)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        bar = ctk.CTkScrollbar(self, command=self.canvas.yview)
-        bar.grid(row=0, column=1, sticky="ns")
-        self.canvas.configure(yscrollcommand=bar.set)
-        self.inner = ctk.CTkFrame(self.canvas, fg_color="transparent")
-        win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(win, width=e.width))
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
 
-    def _wheel(self, e):
-        self.canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+def short(name, n=28):
+    return name if len(name) <= n else name[:n - 1] + "…"
+
+
+class SlotRow:
+    """Linha de um som. O proprio objeto e o id do canal no engine."""
+
+    def __init__(self, app, slot):
+        self.app, self.slot = app, slot
+        self.dur = 0.0
+        self.drag_until = 0.0
+        self.active = False
+        p = app.list
+        self.key = KeyButton(p, "▶", slot["key"], lambda: app._play_slot(self),
+                             lambda kb: app._rebind(kb, lambda k: slot.__setitem__("key", k)))
+        self.file_btn = ctk.CTkButton(p, text="Arquivo...", width=78, command=lambda: app._pick(self))
+        self.name = ctk.CTkLabel(p, text=short(Path(slot["path"]).name) or "(sem arquivo)", anchor="w")
+        self.time = ctk.CTkLabel(p, text="-:-- / -:--", width=84, text_color="gray70")
+        self.progress = ctk.CTkSlider(p, from_=0, to=1, width=170, command=self._seek)
+        self.progress.set(0)
+        self.vol = ctk.CTkSlider(p, from_=0, to=1.5, width=90, command=self._volume)
+        self.vol.set(slot["volume"])
+        self.play_btn = ctk.CTkButton(p, text="▶", width=30, command=lambda: app._play_slot(self))
+        self.pause_btn = ctk.CTkButton(p, text="⏸", width=30, command=lambda: app.engine.pause(self))
+        self.stop_btn = ctk.CTkButton(p, text="■", width=30, command=lambda: app.engine.stop(self))
+        self.rm_btn = ctk.CTkButton(p, text="✕", width=30, fg_color="#7a2b2b", hover_color="#a33",
+                                    command=lambda: app._remove_slot(self))
+        self.widgets = [self.key, self.file_btn, self.name, self.time, self.progress, self.vol,
+                        self.play_btn, self.pause_btn, self.stop_btn, self.rm_btn]
+
+    def grid(self, r):
+        for c, w in enumerate(self.widgets):
+            w.grid(row=r, column=c, padx=(4, 2) if c else (4, 6), pady=3,
+                   sticky="ew" if w is self.name else "")
+
+    def destroy(self):
+        for w in self.widgets:
+            w.destroy()
+
+    def _seek(self, v):
+        self.drag_until = time.monotonic() + 0.4
+        self.app.engine.seek(self, float(v))
+
+    def _volume(self, v):
+        self.slot["volume"] = float(v)
+        self.app.engine.set_gain(self, float(v))
+
+    def tick(self):
+        st = self.app.engine.state(self)
+        if st is None:
+            pos, dur, playing = 0.0, 0.0, False
+            self.time.configure(text="-:-- / -:--")
+        else:
+            pos, dur, playing = st
+            self.time.configure(text=f"{mmss(pos)} / {mmss(dur)}")
+        if dur != self.dur:
+            self.dur = dur
+            self.progress.configure(to=max(dur, 0.01))
+        if time.monotonic() > self.drag_until:
+            self.progress.set(pos)
+        if playing != self.active:
+            self.active = playing
+            self.key.set_active(playing)
 
 
 class App(ctk.CTk):
@@ -43,19 +91,23 @@ class App(ctk.CTk):
         super().__init__()
         ctk.set_appearance_mode("dark")
         self.title("Sound Mod")
-        self.geometry("820x720")
-        self.minsize(720, 560)
+        self.geometry("1040x780")
+        self.minsize(940, 620)
 
         self.cfg = config.load()
         self.engine = Engine()
         self.recorder = LoopbackRecorder(self.cfg["clip_seconds"])
         self.hotkeys = HotkeyManager()
-        self.slot_rows = []
+        self.rows = []
+        self.clip_active = False
 
         self.ins, self.outs = wasapi_devices()
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(200, self._start_all)
+        self.after(100, self._tick)
+        if config.CLIP_PATH.exists():
+            threading.Thread(target=self._load_clip, args=(False,), daemon=True).start()
 
     # ---------- construcao da UI ----------
     def _build(self):
@@ -110,7 +162,7 @@ class App(ctk.CTk):
                      "use 'CABLE Output' como microfone no Discord/jogo.",
             ).grid(row=1, column=0, sticky="w", padx=14, pady=2)
 
-        # slots
+        # sons
         box = ctk.CTkFrame(self)
         box.grid(row=2, column=0, sticky="nsew", padx=12, pady=6)
         box.grid_columnconfigure(0, weight=1)
@@ -118,54 +170,52 @@ class App(ctk.CTk):
         head = ctk.CTkFrame(box, fg_color="transparent")
         head.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
         ctk.CTkLabel(head, text="Sons", font=ctk.CTkFont(size=15, weight="bold")).pack(side="left", padx=6)
+        ctk.CTkLabel(head, text="▶ toca  ·  ✎ muda a tecla", text_color="gray60").pack(side="left", padx=10)
         ctk.CTkButton(head, text="+ Adicionar som", width=130, command=self._add_slot).pack(side="right")
         scroll = ScrollFrame(box)
         scroll.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
         self.list = scroll.inner
         self.list.grid_columnconfigure(2, weight=1)
         for s in self.cfg["slots"]:
-            self._slot_row(s)
+            self._add_row(s)
 
-        # clip
+        # clipe do audio do PC
         clip = ctk.CTkFrame(self)
         clip.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
-        self.save_key = self._key_button(clip, "Salvar ultimos", "save_clip_key", 0)
-        self.play_key = self._key_button(clip, "Tocar clipe", "play_clip_key", 1)
-        self.stop_key = self._key_button(clip, "Parar tudo", "stop_key", 2)
+        clip.grid_columnconfigure(8, weight=1)
+        ctk.CTkLabel(clip, text="Salvar ultimos").grid(row=0, column=0, padx=(10, 4), pady=8)
         self.secs = ctk.CTkEntry(clip, width=40)
         self.secs.insert(0, str(self.cfg["clip_seconds"]))
-        self.secs.grid(row=0, column=6, padx=(10, 2))
-        ctk.CTkLabel(clip, text="seg").grid(row=0, column=7, padx=(0, 10))
+        self.secs.grid(row=0, column=1, padx=2)
+        ctk.CTkLabel(clip, text="seg").grid(row=0, column=2, padx=(2, 6))
+        self.save_key = self._cfg_key_button(clip, "●", "save_clip_key", self._save_clip)
+        self.save_key.grid(row=0, column=3, padx=(0, 16))
+        ctk.CTkLabel(clip, text="Clipe").grid(row=0, column=4, padx=(0, 4))
+        self.clip_key = self._cfg_key_button(clip, "▶", "play_clip_key", self._play_clip)
+        self.clip_key.grid(row=0, column=5, padx=(0, 4))
+        ctk.CTkButton(clip, text="⏸", width=30, command=lambda: self.engine.pause(CLIP)).grid(row=0, column=6, padx=2)
+        ctk.CTkButton(clip, text="■", width=30, command=lambda: self.engine.stop(CLIP)).grid(row=0, column=7, padx=2)
+        ctk.CTkLabel(clip, text="Parar tudo").grid(row=0, column=9, padx=(0, 4))
+        self.stop_key = self._cfg_key_button(clip, "■", "stop_key", self.engine.stop_all)
+        self.stop_key.grid(row=0, column=10, padx=(0, 10))
+        self.wave = Waveform(clip, self._clip_range, self._clip_seek)
+        self.wave.grid(row=1, column=0, columnspan=11, sticky="ew", padx=10, pady=(0, 4))
+        ctk.CTkLabel(clip, text_color="gray60", text="Arraste as alcas laranjas para escolher o trecho que toca; "
+                                                     "clique na onda para mudar a posicao.").grid(
+            row=2, column=0, columnspan=11, sticky="w", padx=10, pady=(0, 6))
 
         self.status = ctk.CTkLabel(self, text="Pronto.", anchor="w")
         self.status.grid(row=4, column=0, sticky="ew", padx=14, pady=(2, 10))
 
-    def _key_button(self, parent, label, cfg_key, col):
-        ctk.CTkLabel(parent, text=label).grid(row=0, column=col * 2, padx=(10, 4), pady=8)
-        btn = ctk.CTkButton(parent, text=self.cfg[cfg_key].upper() or "-", width=90)
-        btn.configure(command=lambda: self._rebind(btn, lambda k: self.cfg.__setitem__(cfg_key, k)))
-        btn.grid(row=0, column=col * 2 + 1, padx=(0, 6))
-        return btn
+    def _cfg_key_button(self, parent, icon, cfg_key, action):
+        return KeyButton(parent, icon, self.cfg[cfg_key], action,
+                         lambda kb: self._rebind(kb, lambda k: self.cfg.__setitem__(cfg_key, k)))
 
-    def _slot_row(self, slot):
-        r = len(self.slot_rows)
-        key_btn = ctk.CTkButton(self.list, text=slot["key"].upper() or "-", width=80)
-        key_btn.configure(command=lambda: self._rebind(key_btn, lambda k: slot.__setitem__("key", k)))
-        key_btn.grid(row=r, column=0, padx=4, pady=3)
-        ctk.CTkButton(self.list, text="Arquivo...", width=80,
-                      command=lambda: self._pick(slot, name_lbl)).grid(row=r, column=1, padx=4)
-        name_lbl = ctk.CTkLabel(self.list, text=Path(slot["path"]).name or "(sem arquivo)", anchor="w")
-        name_lbl.grid(row=r, column=2, padx=4, sticky="ew")
-        vol = ctk.CTkSlider(self.list, from_=0, to=1.5, width=100,
-                            command=lambda v: slot.__setitem__("volume", float(v)))
-        vol.set(slot["volume"])
-        vol.grid(row=r, column=3, padx=4)
-        ctk.CTkButton(self.list, text="▶", width=32, command=lambda: self._play_slot(slot)
-                      ).grid(row=r, column=4, padx=2)
-        rm = ctk.CTkButton(self.list, text="✕", width=32, fg_color="#7a2b2b", hover_color="#a33")
-        rm.configure(command=lambda: self._remove_slot(slot))
-        rm.grid(row=r, column=5, padx=2)
-        self.slot_rows.append((slot, [key_btn, name_lbl, vol, rm]))
+    def _add_row(self, slot):
+        row = SlotRow(self, slot)
+        row.grid(len(self.rows))
+        self.rows.append(row)
+        return row
 
     # ---------- acoes ----------
     @staticmethod
@@ -182,57 +232,67 @@ class App(ctk.CTk):
     def _say(self, msg):
         self.after(0, lambda: self.status.configure(text=msg))
 
+    def _tick(self):
+        for row in self.rows:
+            row.tick()
+        st = self.engine.state(CLIP)
+        playing = bool(st and st[2])
+        self.wave.set_pos(st[0] if st else None)
+        if playing != self.clip_active:
+            self.clip_active = playing
+            self.clip_key.set_active(playing)
+        self.after(100, self._tick)
+
     def _add_slot(self):
         slot = {"key": "", "path": "", "volume": 1.0}
         self.cfg["slots"].append(slot)
-        self._slot_row(slot)
+        self._add_row(slot)
 
-    def _remove_slot(self, slot):
-        self.cfg["slots"].remove(slot)
-        for s, widgets in self.slot_rows:
-            if s is slot:
-                for w in widgets:
-                    w.destroy()
-        self.slot_rows = [(s, w) for s, w in self.slot_rows if s is not slot]
-        # os widgets restantes mantem a posicao na grid; reorganiza
-        for r, (_, widgets) in enumerate(self.slot_rows):
-            for w in widgets:
-                w.grid_configure(row=r)
+    def _remove_slot(self, row):
+        self.cfg["slots"].remove(row.slot)
+        self.engine.remove(row)
+        row.destroy()
+        self.rows.remove(row)
+        for r, other in enumerate(self.rows):
+            other.grid(r)
         self._register_hotkeys()
 
-    def _pick(self, slot, label):
+    def _pick(self, row):
         path = filedialog.askopenfilename(filetypes=AUDIO_TYPES)
         if not path:
             return
-        slot["path"] = path
-        label.configure(text=Path(path).name)
+        row.slot["path"] = path
+        row.name.configure(text=short(Path(path).name))
         self.engine.invalidate(path)
-        threading.Thread(target=self._preload, args=(path,), daemon=True).start()
+        threading.Thread(target=self._load_slot, args=(row,), daemon=True).start()
 
-    def _preload(self, path, quiet=False):
+    def _load_slot(self, row, quiet=False):
+        path = row.slot["path"]
         try:
-            self.engine.load(path)
+            self.engine.set_sound(row, path, row.slot["volume"])
             if not quiet:
                 self._say(f"Carregado: {Path(path).name}")
+            return True
         except Exception as e:
             self._say(f"Erro ao carregar {Path(path).name}: {e}")
+            return False
 
-    def _play_slot(self, slot):
-        if not slot["path"]:
+    def _play_slot(self, row):
+        name = Path(row.slot["path"]).name
+        if not name:
             return self._say("Esse slot nao tem arquivo.")
-        threading.Thread(target=self._play_path, args=(slot["path"], slot["volume"]), daemon=True).start()
-
-    def _play_path(self, path, vol):
         if not self.engine.running:
             return self._say("Engine parada: escolha a saida e clique em Aplicar.")
-        try:
-            self.engine.play(path, vol)
-            self._say(f"Tocando: {Path(path).name}")
-        except Exception as e:
-            self._say(f"Erro ao tocar: {e}")
+        if self.engine.play(row):
+            return self._say(f"Tocando: {name}")
 
-    def _rebind(self, btn, setter):
-        btn.configure(text="pressione...", state="disabled")
+        def work():  # ainda nao carregado
+            if self._load_slot(row, quiet=True) and self.engine.play(row):
+                self._say(f"Tocando: {name}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _rebind(self, kb, setter):
+        kb.capturing()
         self.hotkeys.clear()
 
         def work():
@@ -240,14 +300,61 @@ class App(ctk.CTk):
                 key = capture_key()
             except Exception:
                 key = ""
-            self.after(0, lambda: self._rebound(btn, setter, key))
+            self.after(0, lambda: self._rebound(kb, setter, key))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _rebound(self, btn, setter, key):
+    def _rebound(self, kb, setter, key):
         setter(key)
-        btn.configure(text=key.upper() or "-", state="normal")
+        kb.set_key(key)
         self._register_hotkeys()
+
+    # ---------- clipe ----------
+    def _save_clip(self):
+        def work():
+            try:
+                dur = self.recorder.save(config.CLIP_PATH)
+            except Exception as e:
+                return self._say(f"Erro ao salvar clipe: {e}")
+            if self._load_clip(reset_trim=True):
+                self._say(f"Clipe salvo ({dur:.1f}s): {config.CLIP_PATH.name}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _load_clip(self, reset_trim):
+        """Roda em thread: decodifica o clipe e manda a GUI mostrar a forma de onda."""
+        try:
+            self.engine.invalidate(config.CLIP_PATH)
+            self.engine.set_sound(CLIP, config.CLIP_PATH)
+            data = self.engine.load(config.CLIP_PATH)
+        except Exception as e:
+            self._say(f"Erro ao abrir clipe: {e}")
+            return False
+        self.after(0, lambda: self._show_clip(data, reset_trim))
+        return True
+
+    def _show_clip(self, data, reset_trim):
+        if reset_trim:
+            self.cfg["clip_trim"] = None
+        start, end = self.cfg["clip_trim"] or (None, None)
+        self.wave.set_audio(data, SR, start, end)
+        self.engine.set_range(CLIP, self.wave.start, self.wave.end)
+
+    def _clip_range(self, start, end):
+        self.cfg["clip_trim"] = [round(start, 3), round(end, 3)]
+        self.engine.set_range(CLIP, start, end)
+        config.save(self.cfg)
+
+    def _clip_seek(self, t):
+        self.engine.seek(CLIP, t)
+        self.wave.set_pos(t)
+
+    def _play_clip(self):
+        if not self.engine.has(CLIP):
+            return self._say("Ainda nao ha clipe salvo.")
+        if not self.engine.running:
+            return self._say("Engine parada: escolha a saida e clique em Aplicar.")
+        self.engine.play(CLIP)
+        self._say("Tocando clipe")
 
     # ---------- engine ----------
     def _apply_live(self):
@@ -284,9 +391,9 @@ class App(ctk.CTk):
             msgs.append("monitor desligado: escolha seus fones em 'Ouvir sons em'")
             mon = NONE
         try:
-            self.engine.start(self._idx(self.ins, self.mic_var.get()),
-                              self._idx(self.outs, out),
-                              self._idx(self.outs, mon))
+            self.engine.open(self._idx(self.ins, self.mic_var.get()),
+                             self._idx(self.outs, out),
+                             self._idx(self.outs, mon))
             msgs.append("audio ligado")
         except Exception as e:
             msgs.append(f"audio: {e}")
@@ -298,13 +405,13 @@ class App(ctk.CTk):
 
         self._register_hotkeys()
         config.save(self.cfg)
-        for s in self.cfg["slots"]:
-            if s["path"]:
-                threading.Thread(target=self._preload, args=(s["path"], True), daemon=True).start()
+        for row in self.rows:
+            if row.slot["path"] and not self.engine.has(row):
+                threading.Thread(target=self._load_slot, args=(row, True), daemon=True).start()
         self.status.configure(text=" | ".join(msgs))
 
     def _register_hotkeys(self):
-        mapping = [(s["key"], (lambda s=s: self._play_slot(s))) for s in self.cfg["slots"]]
+        mapping = [(row.slot["key"], (lambda row=row: self._play_slot(row))) for row in self.rows]
         mapping += [
             (self.cfg["save_clip_key"], self._save_clip),
             (self.cfg["play_clip_key"], self._play_clip),
@@ -314,27 +421,12 @@ class App(ctk.CTk):
         if errors:
             self._say("Tecla invalida: " + "; ".join(errors))
 
-    def _save_clip(self):
-        def work():
-            try:
-                dur = self.recorder.save(config.CLIP_PATH)
-                self.engine.invalidate(config.CLIP_PATH)
-                self._say(f"Clipe salvo ({dur:.1f}s): {config.CLIP_PATH.name}")
-            except Exception as e:
-                self._say(f"Erro ao salvar clipe: {e}")
-        threading.Thread(target=work, daemon=True).start()
-
-    def _play_clip(self):
-        if not config.CLIP_PATH.exists():
-            return self._say("Ainda nao ha clipe salvo.")
-        threading.Thread(target=self._play_path, args=(str(config.CLIP_PATH), 1.0), daemon=True).start()
-
     def _close(self):
         try:
             self.cfg["master_volume"] = float(self.vol_slider.get())
             config.save(self.cfg)
         finally:
             self.hotkeys.clear()
-            self.engine.stop()
+            self.engine.close()
             self.recorder.stop()
             self.destroy()

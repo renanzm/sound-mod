@@ -20,6 +20,8 @@ DEFAULTS = {
     "monitor": True,
     "master_volume": 1.0,
     "clip_seconds": 5,
+    "clip_trim": None,         # [inicio, fim] em s do trecho do clipe que toca
+
     "save_clip_key": "f5",
     "play_clip_key": "f6",
     "stop_key": "f12",

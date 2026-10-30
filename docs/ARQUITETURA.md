@@ -52,7 +52,8 @@ sound-mod/
     ├── engine.py           # mixer e streams de áudio
     ├── recorder.py         # loopback + buffer circular + salvar mp3
     ├── hotkeys.py          # registro de hotkeys globais e captura de tecla
-    └── gui.py              # interface (App, ScrollFrame)
+    ├── widgets.py          # ScrollFrame, KeyButton (botão dividido), Waveform
+    └── gui.py              # interface (App, SlotRow)
 ```
 
 ## 3. Módulos
@@ -60,7 +61,7 @@ sound-mod/
 ### 3.1 `config.py`
 - `load()` mescla `DEFAULTS` com `config.json`; ignora arquivo ausente/corrompido.
 - `save(cfg)` grava JSON UTF-8.
-- Campos: `mic_device`, `output_device`, `monitor_device`, `loopback_device` (nomes de dispositivo), `mix_mic`, `monitor`, `master_volume`, `clip_seconds`, `save_clip_key`, `play_clip_key`, `stop_key`, `slots` (lista de `{key, path, volume}`).
+- Campos: `mic_device`, `output_device`, `monitor_device`, `loopback_device` (nomes de dispositivo), `mix_mic`, `monitor`, `master_volume`, `clip_seconds`, `clip_trim` (`[início, fim]` em s do trecho do clipe, ou `null` = inteiro), `save_clip_key`, `play_clip_key`, `stop_key`, `slots` (lista de `{key, path, volume}`).
 - Dispositivos são guardados **por nome** (índices mudam entre sessões).
 
 ### 3.2 `codec.py`
@@ -77,7 +78,21 @@ Classe `Engine`, no coração do app.
 2. `OutputStream` para o cabo virtual → `_out_cb` mixa sons + mic e escreve a saída.
 3. `OutputStream` opcional de monitor (fones) → `_mon_cb` consome `mon_buf`, alimentado pelo `_out_cb` apenas com os sons (sem o mic, para você não se ouvir).
 
-**Vozes:** `play(path, volume)` adiciona um `_Voice(data, pos, gain)` a uma lista protegida por `lock`; `_render_sounds` soma o próximo bloco de cada voz, remove as terminadas e aplica o volume geral. Sons sobrepostos tocam juntos.
+Os streams abrem com `open(mic, saida, monitor)` e fecham com `close()`.
+
+**Canais:** cada som é um `_Channel(data, pos, start, end, gain, playing)` guardado em `channels[cid]`. O `cid` é o objeto `SlotRow` de cada slot, ou a string `"clip"`. Só o trecho `[start, end)` toca: o slot usa o arquivo inteiro e o clipe usa o corte da forma de onda. Tudo é protegido por `lock`.
+
+| Método | Efeito |
+|---|---|
+| `set_sound(cid, path, gain)` | decodifica (com cache) e cria o canal parado; retorna a duração |
+| `play(cid)` | se já toca, recomeça do início do trecho; senão continua de `pos` |
+| `pause(cid)` | alterna pausa/continuar (parado no início: nada) |
+| `stop(cid)` / `stop_all()` | para e volta `pos` ao início do trecho |
+| `seek(cid, s)` | move `pos`, limitado ao trecho |
+| `set_gain`, `set_range(cid, ini, fim)` | volume ao vivo, corte do trecho |
+| `state(cid)` | `(pos_s, duração_total_s, tocando)` para a GUI |
+
+`_render_sounds` soma o próximo bloco de cada canal tocando e aplica o volume geral. Ao chegar ao fim do trecho, o canal para e volta ao início. Sons de slots diferentes tocam juntos; o mesmo slot não se sobrepõe a si mesmo (apertar de novo recomeça).
 
 **Latência:** `mic_buf` e `mon_buf` descartam o excedente acima de 250 ms (`MAX_LAG`) para a defasagem não crescer se os relógios dos dispositivos divergirem.
 
@@ -85,7 +100,7 @@ Classe `Engine`, no coração do app.
 
 **Saída:** soma, `np.clip` em [-1, 1].
 
-**Regras:** callbacks de áudio não alocam em excesso, não fazem I/O e não chamam a GUI. `play` pode lançar exceção (decodificação), então é chamado fora do callback, em thread.
+**Regras:** callbacks de áudio não alocam em excesso, não fazem I/O e não chamam a GUI. `set_sound` pode demorar e lançar exceção (decodificação), então roda em thread; os demais métodos de canal são instantâneos e podem ser chamados de qualquer thread.
 
 ### 3.4 `recorder.py`
 Classe `LoopbackRecorder`.
@@ -94,7 +109,7 @@ Classe `LoopbackRecorder`.
 - Sem `stream_callback`: o callback C do PyAudioWPatch travou no Python 3.15.
 - `save(path)` concatena, corta os últimos N s e codifica em mp3. Retorna a duração.
 - Observação do WASAPI loopback: sem áudio tocando no PC não chegam amostras, então o buffer pode estar vazio ("Nada gravado ainda").
-- Importante: o app toca no **cabo**, não no alto-falante padrão, então o loopback do alto-falante não captura os próprios sons do app (sem realimentação).
+- Se o monitor e o loopback usam o mesmo dispositivo (ex.: os fones), o clipe também grava os sons do próprio app. Não há realimentação no microfone, porque o loopback nunca captura o cabo.
 
 ### 3.5 `hotkeys.py`
 - `HotkeyManager.register([(tecla, callback), ...])` usa `keyboard.add_hotkey`; teclas vazias são ignoradas, teclas inválidas voltam como lista de erros. `clear()` remove tudo.
@@ -102,22 +117,34 @@ Classe `LoopbackRecorder`.
 - Callbacks chegam na thread do `keyboard`, nunca na da GUI.
 
 ### 3.6 `gui.py`
-- `App(ctk.CTk)`: seções de dispositivos, lista de slots, linha de teclas do clipe e barra de status.
-- **Slots:** botão da tecla (clicar → "pressione..." → captura), seletor de arquivo, nome, slider de volume (0–1,5), botão ▶ e ✕.
+- `App(ctk.CTk)`: seções de dispositivos, lista de slots, área do clipe e barra de status.
+- **`SlotRow`** (uma por slot, e é o id do canal no engine): `KeyButton` (▶ toca / ✎ muda a tecla), "Arquivo...", nome, tempo `m:ss / m:ss`, slider de progresso (arrastar = `seek`), slider de volume (0–1,5, ao vivo), ▶ ⏸ ■ e ✕.
+- **Área do clipe:** segundos + `KeyButton` de salvar (●), `KeyButton` do clipe (▶) com ⏸ ■, `KeyButton` de parar tudo e a `Waveform` com o corte.
+- **`_tick`** (a cada 100 ms, thread da GUI): lê `engine.state` de cada canal e atualiza tempo, progresso, cursor da onda e a cor verde do botão que está tocando. Enquanto o usuário arrasta o progresso, a atualização daquele slider pausa por 0,4 s para não brigar com o mouse.
+
+### 3.7 `widgets.py`
 - `ScrollFrame`: Canvas + `CTkScrollbar` próprio. **Não usar `CTkScrollableFrame`**, que trava no Python 3.15.
+- `KeyButton`: dois botões lado a lado. O principal (`ícone + TECLA`) executa a ação; o ✎ chama a captura de tecla. `capturing()`, `set_key()`, `set_active()`.
+- `Waveform` (`tk.Canvas`): reduz o áudio a ~2000 picos e desenha uma coluna por pixel, normalizada. O trecho selecionado fica em azul, o resto em cinza. As alças laranjas (início/fim) são arrastáveis e chamam `on_range(ini, fim)` ao soltar; clicar no meio chama `on_seek(t)`. O cursor branco é movido por `set_pos(t)` sem redesenhar a onda.
 - **Cuidado:** nunca atribuir atributos `master`, `children`, `tk`, etc. em subclasses de widgets tkinter (um bug assim já gerou loop infinito em `_root`).
 - Toda atualização de widget vinda de outra thread passa por `self.after(0, ...)` (`_say`).
 - `_start_all()` (botão "Aplicar / Reiniciar" e início automático): lê a UI → `cfg`, reinicia `Engine` e `Recorder`, registra hotkeys, salva config e pré-carrega os arquivos em threads.
 
 ## 4. Fluxos principais
 
-**Tocar um slot (F1):** hotkey → `_play_slot` → thread → `Engine.play` (decodifica se não estiver em cache) → voz entra na lista → `_out_cb` mixa no próximo bloco.
+**Carregar slots:** ao iniciar/aplicar (e ao escolher arquivo), uma thread chama `engine.set_sound(row, path)`.
 
-**Salvar clipe (F5):** hotkey → thread → `recorder.save(clips/last_clip.mp3)` → `engine.invalidate` → status "Clipe salvo".
+**Tocar um slot (F1 ou botão ▶):** `_play_slot(row)` → `engine.play(row)`. Se o canal ainda não estiver carregado, carrega numa thread e toca em seguida. `_out_cb` mixa no próximo bloco.
 
-**Tocar clipe (F6):** hotkey → `Engine.play(last_clip.mp3, 1.0)`.
+**Pausar / parar / buscar:** ⏸ → `engine.pause(row)`, ■ → `engine.stop(row)`, arrastar o progresso → `engine.seek(row, s)`.
 
-**Parar tudo (F12):** `Engine.stop_all` esvazia as vozes.
+**Salvar clipe (F5):** hotkey → thread → `recorder.save(clips/last_clip.mp3)` → `_load_clip(reset_trim=True)` decodifica e cria o canal `"clip"` → na GUI, `_show_clip` desenha a onda e aplica o trecho inteiro. Ao abrir o app, um clipe existente é carregado com o `clip_trim` salvo.
+
+**Cortar o clipe:** soltar uma alça → `_clip_range` → `engine.set_range("clip", ini, fim)` e salva `clip_trim`.
+
+**Tocar clipe (F6):** `engine.play("clip")`, só no trecho escolhido.
+
+**Parar tudo (F12):** `engine.stop_all()`.
 
 **Trocar tecla:** `_rebind` limpa as hotkeys → `capture_key` em thread → `_rebound` grava no `cfg` e registra de novo.
 
