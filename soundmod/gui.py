@@ -73,7 +73,8 @@ class App(ctk.CTk):
 
         self.mic_var = ctk.StringVar(value=self.cfg["mic_device"] or self._default(in_names, "Microfone"))
         self.out_var = ctk.StringVar(value=self.cfg["output_device"] or cable or NONE)
-        self.mon_var = ctk.StringVar(value=self.cfg["monitor_device"] or NONE)
+        phones = next((n for n in out_names if "CABLE" not in n), NONE)
+        self.mon_var = ctk.StringVar(value=self.cfg["monitor_device"] or phones)
         self.loop_var = ctk.StringVar(value=self.cfg["loopback_device"] or "(alto-falante padrao)")
 
         rows = [
@@ -208,10 +209,11 @@ class App(ctk.CTk):
         self.engine.invalidate(path)
         threading.Thread(target=self._preload, args=(path,), daemon=True).start()
 
-    def _preload(self, path):
+    def _preload(self, path, quiet=False):
         try:
             self.engine.load(path)
-            self._say(f"Carregado: {Path(path).name}")
+            if not quiet:
+                self._say(f"Carregado: {Path(path).name}")
         except Exception as e:
             self._say(f"Erro ao carregar {Path(path).name}: {e}")
 
@@ -225,6 +227,7 @@ class App(ctk.CTk):
             return self._say("Engine parada: escolha a saida e clique em Aplicar.")
         try:
             self.engine.play(path, vol)
+            self._say(f"Tocando: {Path(path).name}")
         except Exception as e:
             self._say(f"Erro ao tocar: {e}")
 
@@ -273,10 +276,17 @@ class App(ctk.CTk):
         self.recorder.seconds = secs
 
         msgs = []
+        out, mon = self.out_var.get(), self.mon_var.get()
+        if out != NONE and "CABLE" not in out:
+            msgs.append("AVISO: a saida deve ser o cabo virtual (CABLE Input)")
+        if mon == out or "CABLE" in mon:
+            # monitor no cabo duplica os sons no microfone (eco) e voce nao ouve nada
+            msgs.append("monitor desligado: escolha seus fones em 'Ouvir sons em'")
+            mon = NONE
         try:
             self.engine.start(self._idx(self.ins, self.mic_var.get()),
-                              self._idx(self.outs, self.out_var.get()),
-                              self._idx(self.outs, self.mon_var.get()))
+                              self._idx(self.outs, out),
+                              self._idx(self.outs, mon))
             msgs.append("audio ligado")
         except Exception as e:
             msgs.append(f"audio: {e}")
@@ -290,7 +300,7 @@ class App(ctk.CTk):
         config.save(self.cfg)
         for s in self.cfg["slots"]:
             if s["path"]:
-                threading.Thread(target=self._preload, args=(s["path"],), daemon=True).start()
+                threading.Thread(target=self._preload, args=(s["path"], True), daemon=True).start()
         self.status.configure(text=" | ".join(msgs))
 
     def _register_hotkeys(self):
