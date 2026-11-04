@@ -28,7 +28,7 @@ Sons (F1, F2...) ┘      └─► seus fones (monitor)
 
 ### Opção 1: executável (recomendado)
 1. Instale o [VB-CABLE](https://vb-audio.com/Cable/) (gratuito) e reinicie o PC.
-2. Baixe o `SoundMod-v1.0.0-windows.zip` na [página de Releases](../../releases), extraia e abra `SoundMod.exe`.
+2. Baixe o `SoundMod-vX.Y.Z-windows.zip` da [última release](../../releases/latest), extraia a pasta inteira e abra `SoundMod.exe`.
 
 ### Opção 2: rodar do código
 Requer Windows 10/11 e Python 3.11+.
