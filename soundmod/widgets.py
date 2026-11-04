@@ -31,26 +31,30 @@ class ScrollFrame(ctk.CTkFrame):
 
 
 class KeyButton(ctk.CTkFrame):
-    """Botao dividido: a parte principal executa a acao, o lapis edita a hotkey."""
+    """Botao dividido: a parte principal executa a acao, o lapis edita a hotkey e o ⌫ remove a hotkey."""
 
-    def __init__(self, master, icon, key, on_action, on_edit, width=70):
+    def __init__(self, master, icon, key, on_action, on_edit, on_clear, width=70):
         super().__init__(master, fg_color="transparent")
         self.icon = icon
         self.normal = ctk.ThemeManager.theme["CTkButton"]["fg_color"]
+        gray = dict(fg_color=("gray70", "gray30"), hover_color=("gray60", "gray40"))
         self.main = ctk.CTkButton(self, width=width, command=on_action)
         self.main.grid(row=0, column=0)
-        self.edit = ctk.CTkButton(self, text="✎", width=26, fg_color=("gray70", "gray30"),
-                                  hover_color=("gray60", "gray40"), command=lambda: on_edit(self))
+        self.edit = ctk.CTkButton(self, text="✎", width=26, command=lambda: on_edit(self), **gray)
         self.edit.grid(row=0, column=1, padx=(2, 0))
+        self.clear = ctk.CTkButton(self, text="⌫", width=26, command=lambda: on_clear(self), **gray)
+        self.clear.grid(row=0, column=2, padx=(2, 0))
         self.set_key(key)
 
     def set_key(self, key):
         self.main.configure(text=f"{self.icon} {key.upper() if key else '-'}", state="normal")
         self.edit.configure(state="normal")
+        self.clear.configure(state="normal" if key else "disabled")
 
     def capturing(self):
         self.main.configure(text="tecla...", state="disabled")
         self.edit.configure(state="disabled")
+        self.clear.configure(state="disabled")
 
     def set_active(self, on):
         self.main.configure(fg_color=ACTIVE if on else self.normal)

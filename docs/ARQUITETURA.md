@@ -85,14 +85,15 @@ Os streams abrem com `open(mic, saida, monitor)` e fecham com `close()`.
 | Método | Efeito |
 |---|---|
 | `set_sound(cid, path, gain)` | decodifica (com cache) e cria o canal parado; retorna a duração |
-| `play(cid)` | se já toca, recomeça do início do trecho; senão continua de `pos` |
-| `pause(cid)` | alterna pausa/continuar (parado no início: nada) |
+| `play(cid)` | se já toca, recomeça do início do trecho; senão continua de `pos` (para os outros canais) |
+| `toggle(cid)` | tocando → para; senão toca como `play`. Retorna o novo estado, ou `None` se o canal não existe |
+| `pause(cid)` | alterna pausa/continuar (parado no início: nada); continuar também para os outros canais |
 | `stop(cid)` / `stop_all()` | para e volta `pos` ao início do trecho |
 | `seek(cid, s)` | move `pos`, limitado ao trecho |
 | `set_gain`, `set_range(cid, ini, fim)` | volume ao vivo, corte do trecho |
 | `state(cid)` | `(pos_s, duração_total_s, tocando)` para a GUI |
 
-`_render_sounds` soma o próximo bloco de cada canal tocando e aplica o volume geral. Ao chegar ao fim do trecho, o canal para e volta ao início. Sons de slots diferentes tocam juntos; o mesmo slot não se sobrepõe a si mesmo (apertar de novo recomeça).
+`_render_sounds` soma o próximo bloco de cada canal tocando e aplica o volume geral. Ao chegar ao fim do trecho, o canal para e volta ao início. **Só um som por vez:** `play`, `toggle` e continuar uma pausa chamam `_solo(cid)`, que para todos os outros canais (inclusive o clipe) e os volta ao início.
 
 **Latência:** `mic_buf` e `mon_buf` descartam o excedente acima de 250 ms (`MAX_LAG`) para a defasagem não crescer se os relógios dos dispositivos divergirem.
 
@@ -124,7 +125,7 @@ Classe `LoopbackRecorder`.
 
 ### 3.7 `widgets.py`
 - `ScrollFrame`: Canvas + `CTkScrollbar` próprio. **Não usar `CTkScrollableFrame`**, que trava no Python 3.15.
-- `KeyButton`: dois botões lado a lado. O principal (`ícone + TECLA`) executa a ação; o ✎ chama a captura de tecla. `capturing()`, `set_key()`, `set_active()`.
+- `KeyButton`: três botões lado a lado. O principal (`ícone + TECLA`) executa a ação; o ✎ chama a captura de tecla; o ⌫ remove a tecla (fica desativado quando não há tecla). `capturing()`, `set_key()`, `set_active()`.
 - `Waveform` (`tk.Canvas`): reduz o áudio a ~2000 picos e desenha uma coluna por pixel, normalizada. O trecho selecionado fica em azul, o resto em cinza. As alças laranjas (início/fim) são arrastáveis e chamam `on_range(ini, fim)` ao soltar; clicar no meio chama `on_seek(t)`. O cursor branco é movido por `set_pos(t)` sem redesenhar a onda.
 - **Cuidado:** nunca atribuir atributos `master`, `children`, `tk`, etc. em subclasses de widgets tkinter (um bug assim já gerou loop infinito em `_root`).
 - Toda atualização de widget vinda de outra thread passa por `self.after(0, ...)` (`_say`).
@@ -134,7 +135,7 @@ Classe `LoopbackRecorder`.
 
 **Carregar slots:** ao iniciar/aplicar (e ao escolher arquivo), uma thread chama `engine.set_sound(row, path)`.
 
-**Tocar um slot (F1 ou botão ▶):** `_play_slot(row)` → `engine.play(row)`. Se o canal ainda não estiver carregado, carrega numa thread e toca em seguida. `_out_cb` mixa no próximo bloco.
+**Tocar/parar um slot (hotkey ou botão da tecla):** `_toggle_slot(row)` → `engine.toggle(row)`: a primeira vez toca, a segunda para. O ▶ separado usa `engine.play(row)` (sempre toca, recomeçando). Se o canal ainda não estiver carregado, carrega numa thread e toca em seguida. `_out_cb` mixa no próximo bloco.
 
 **Pausar / parar / buscar:** ⏸ → `engine.pause(row)`, ■ → `engine.stop(row)`, arrastar o progresso → `engine.seek(row, s)`.
 
@@ -142,11 +143,13 @@ Classe `LoopbackRecorder`.
 
 **Cortar o clipe:** soltar uma alça → `_clip_range` → `engine.set_range("clip", ini, fim)` e salva `clip_trim`.
 
-**Tocar clipe (F6):** `engine.play("clip")`, só no trecho escolhido.
+**Tocar/parar clipe (F6):** `_toggle_clip` → `engine.toggle("clip")`, só no trecho escolhido.
 
 **Parar tudo (F12):** `engine.stop_all()`.
 
-**Trocar tecla:** `_rebind` limpa as hotkeys → `capture_key` em thread → `_rebound` grava no `cfg` e registra de novo.
+**Trocar tecla:** `_rebind` limpa as hotkeys → `capture_key` em thread → `_rebound` grava no `cfg`, registra de novo e salva o `config.json`.
+
+**Remover tecla (⌫):** `_unbind` → `_rebound(..., "")`: a ação fica sem hotkey, mas o botão continua funcionando com o mouse.
 
 ## 5. Threads
 

@@ -83,6 +83,13 @@ class Engine:
     def has(self, cid):
         return cid in self.channels
 
+    def _solo(self, cid):
+        """So um som por vez: para todos os outros canais (chamar com o lock)."""
+        for other, ch in self.channels.items():
+            if other is not cid and (ch.playing or ch.pos != ch.start):
+                ch.playing = False
+                ch.pos = ch.start
+
     def play(self, cid):
         """Se ja estiver tocando, recomeca; senao continua de onde parou."""
         with self.lock:
@@ -91,6 +98,23 @@ class Engine:
                 return False
             if ch.playing or not ch.start <= ch.pos < ch.end:
                 ch.pos = ch.start
+            self._solo(cid)
+            ch.playing = True
+            return True
+
+    def toggle(self, cid):
+        """Tocando -> para; senao toca (continua se estava pausado). Retorna se ficou tocando ou None."""
+        with self.lock:
+            ch = self.channels.get(cid)
+            if ch is None:
+                return None
+            if ch.playing:
+                ch.playing = False
+                ch.pos = ch.start
+                return False
+            if not ch.start <= ch.pos < ch.end:
+                ch.pos = ch.start
+            self._solo(cid)
             ch.playing = True
             return True
 
@@ -99,6 +123,8 @@ class Engine:
         with self.lock:
             ch = self.channels.get(cid)
             if ch and (ch.playing or ch.pos != ch.start):
+                if not ch.playing:
+                    self._solo(cid)
                 ch.playing = not ch.playing
 
     def stop(self, cid):

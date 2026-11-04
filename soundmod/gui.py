@@ -34,8 +34,9 @@ class SlotRow:
         self.drag_until = 0.0
         self.active = False
         p = app.list
-        self.key = KeyButton(p, "▶", slot["key"], lambda: app._play_slot(self),
-                             lambda kb: app._rebind(kb, lambda k: slot.__setitem__("key", k)))
+        set_key = lambda k: slot.__setitem__("key", k)
+        self.key = KeyButton(p, "▶", slot["key"], lambda: app._toggle_slot(self),
+                             lambda kb: app._rebind(kb, set_key), lambda kb: app._unbind(kb, set_key))
         self.file_btn = ctk.CTkButton(p, text="Arquivo...", width=78, command=lambda: app._pick(self))
         self.name = ctk.CTkLabel(p, text=short(Path(slot["path"]).name) or "(sem arquivo)", anchor="w")
         self.time = ctk.CTkLabel(p, text="-:-- / -:--", width=84, text_color="gray70")
@@ -170,7 +171,7 @@ class App(ctk.CTk):
         head = ctk.CTkFrame(box, fg_color="transparent")
         head.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
         ctk.CTkLabel(head, text="Sons", font=ctk.CTkFont(size=15, weight="bold")).pack(side="left", padx=6)
-        ctk.CTkLabel(head, text="▶ toca  ·  ✎ muda a tecla", text_color="gray60").pack(side="left", padx=10)
+        ctk.CTkLabel(head, text="▶ toca/para  ·  ✎ muda a tecla  ·  ⌫ remove a tecla  ·  um som por vez", text_color="gray60").pack(side="left", padx=10)
         ctk.CTkButton(head, text="+ Adicionar som", width=130, command=self._add_slot).pack(side="right")
         scroll = ScrollFrame(box)
         scroll.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
@@ -191,7 +192,7 @@ class App(ctk.CTk):
         self.save_key = self._cfg_key_button(clip, "●", "save_clip_key", self._save_clip)
         self.save_key.grid(row=0, column=3, padx=(0, 16))
         ctk.CTkLabel(clip, text="Clipe").grid(row=0, column=4, padx=(0, 4))
-        self.clip_key = self._cfg_key_button(clip, "▶", "play_clip_key", self._play_clip)
+        self.clip_key = self._cfg_key_button(clip, "▶", "play_clip_key", self._toggle_clip)
         self.clip_key.grid(row=0, column=5, padx=(0, 4))
         ctk.CTkButton(clip, text="⏸", width=30, command=lambda: self.engine.pause(CLIP)).grid(row=0, column=6, padx=2)
         ctk.CTkButton(clip, text="■", width=30, command=lambda: self.engine.stop(CLIP)).grid(row=0, column=7, padx=2)
@@ -208,8 +209,9 @@ class App(ctk.CTk):
         self.status.grid(row=4, column=0, sticky="ew", padx=14, pady=(2, 10))
 
     def _cfg_key_button(self, parent, icon, cfg_key, action):
+        set_key = lambda k: self.cfg.__setitem__(cfg_key, k)
         return KeyButton(parent, icon, self.cfg[cfg_key], action,
-                         lambda kb: self._rebind(kb, lambda k: self.cfg.__setitem__(cfg_key, k)))
+                         lambda kb: self._rebind(kb, set_key), lambda kb: self._unbind(kb, set_key))
 
     def _add_row(self, slot):
         row = SlotRow(self, slot)
@@ -277,19 +279,24 @@ class App(ctk.CTk):
             self._say(f"Erro ao carregar {Path(path).name}: {e}")
             return False
 
-    def _play_slot(self, row):
+    def _play_slot(self, row, toggle=False):
+        """▶: toca (recomeca se ja tocava). Hotkey/botao da tecla (toggle): toca ou, se ja tocava, para."""
         name = Path(row.slot["path"]).name
         if not name:
             return self._say("Esse slot nao tem arquivo.")
         if not self.engine.running:
             return self._say("Engine parada: escolha a saida e clique em Aplicar.")
-        if self.engine.play(row):
-            return self._say(f"Tocando: {name}")
+        playing = self.engine.toggle(row) if toggle else self.engine.play(row)
+        if playing is not None:
+            return self._say(f"Tocando: {name}" if playing else f"Parado: {name}")
 
         def work():  # ainda nao carregado
             if self._load_slot(row, quiet=True) and self.engine.play(row):
                 self._say(f"Tocando: {name}")
         threading.Thread(target=work, daemon=True).start()
+
+    def _toggle_slot(self, row):
+        self._play_slot(row, toggle=True)
 
     def _rebind(self, kb, setter):
         kb.capturing()
@@ -308,6 +315,11 @@ class App(ctk.CTk):
         setter(key)
         kb.set_key(key)
         self._register_hotkeys()
+        config.save(self.cfg)
+
+    def _unbind(self, kb, setter):
+        self._rebound(kb, setter, "")
+        self._say("Tecla removida.")
 
     # ---------- clipe ----------
     def _save_clip(self):
@@ -348,13 +360,12 @@ class App(ctk.CTk):
         self.engine.seek(CLIP, t)
         self.wave.set_pos(t)
 
-    def _play_clip(self):
+    def _toggle_clip(self):
         if not self.engine.has(CLIP):
             return self._say("Ainda nao ha clipe salvo.")
         if not self.engine.running:
             return self._say("Engine parada: escolha a saida e clique em Aplicar.")
-        self.engine.play(CLIP)
-        self._say("Tocando clipe")
+        self._say("Tocando clipe" if self.engine.toggle(CLIP) else "Clipe parado")
 
     # ---------- engine ----------
     def _apply_live(self):
@@ -411,10 +422,10 @@ class App(ctk.CTk):
         self.status.configure(text=" | ".join(msgs))
 
     def _register_hotkeys(self):
-        mapping = [(row.slot["key"], (lambda row=row: self._play_slot(row))) for row in self.rows]
+        mapping = [(row.slot["key"], (lambda row=row: self._toggle_slot(row))) for row in self.rows]
         mapping += [
             (self.cfg["save_clip_key"], self._save_clip),
-            (self.cfg["play_clip_key"], self._play_clip),
+            (self.cfg["play_clip_key"], self._toggle_clip),
             (self.cfg["stop_key"], self.engine.stop_all),
         ]
         errors = self.hotkeys.register(mapping)

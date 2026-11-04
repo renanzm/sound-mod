@@ -42,7 +42,8 @@ python -m venv .venv
 
 1. **Microfone real**: seu microfone físico. **Saída → cabo virtual**: `CABLE Input`. **Ouvir sons em**: seus fones (não escolha o cabo aqui).
 2. No Discord/jogo, escolha **CABLE Output** como microfone. No Discord, desligue supressão de ruído, cancelamento de eco e controle automático de ganho, que costumam cortar efeitos sonoros.
-3. Atribua arquivos aos slots. Cada botão de tecla é dividido: **▶ F1** toca, **✎** muda a tecla.
+3. Atribua arquivos aos slots. Cada botão de tecla é dividido: **▶ F1** toca e, apertado de novo, para; **✎** muda a tecla; **⌫** remove a tecla.
+   Só um som toca por vez: tocar outro interrompe o atual.
 4. **F5** salva os últimos N segundos do áudio do PC e mostra a forma de onda; arraste as alças laranjas para escolher o trecho. **F6** toca o trecho. **F12** para tudo.
 
 As configurações ficam em `config.json` ao lado do programa.
