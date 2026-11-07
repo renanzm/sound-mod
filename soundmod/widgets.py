@@ -3,6 +3,8 @@ import tkinter as tk
 import customtkinter as ctk
 import numpy as np
 
+from .i18n import t
+
 ACTIVE = "#2e8b57"  # botao de um som que esta tocando
 
 
@@ -52,7 +54,7 @@ class KeyButton(ctk.CTkFrame):
         self.clear.configure(state="normal" if key else "disabled")
 
     def capturing(self):
-        self.main.configure(text="tecla...", state="disabled")
+        self.main.configure(text=t("press_key"), state="disabled")
         self.edit.configure(state="disabled")
         self.clear.configure(state="disabled")
 
@@ -128,7 +130,7 @@ class Waveform(tk.Canvas):
         self._head = None
         w, h = self.winfo_width(), self.winfo_height()
         if self.peaks is None or w < 20:
-            self.create_text(w / 2, h / 2, fill="gray60", text="Nenhum clipe ainda: pressione a tecla de salvar")
+            self.create_text(w / 2, h / 2, fill="gray60", text=t("no_clip"))
             return
         xs, xe = self._x(self.start), self._x(self.end)
         self.create_rectangle(xs, 0, xe, h, fill=self.SEL, width=0)
@@ -144,13 +146,13 @@ class Waveform(tk.Canvas):
             color = self.WAVE if xs <= x <= xe else self.DIM
             self.create_line(x, mid - a * half - 0.5, x, mid + a * half + 0.5, fill=color)
 
-        for x, t, anchor in ((xs, self.start, "nw"), (xe, self.end, "ne")):
+        for x, when, anchor in ((xs, self.start, "nw"), (xe, self.end, "ne")):
             self.create_line(x, 0, x, h, fill=self.HANDLE, width=2)
             self.create_rectangle(x - 4, h / 2 - 10, x + 4, h / 2 + 10, fill=self.HANDLE, width=0)
             self.create_text(x + (3 if anchor == "nw" else -3), 2, anchor=anchor,
-                             fill=self.HANDLE, font=("Segoe UI", 8), text=fmt(t))
+                             fill=self.HANDLE, font=("Segoe UI", 8), text=fmt(when))
         self.create_text(w - self.PAD, h - 2, anchor="se", fill="gray60", font=("Segoe UI", 8),
-                         text=f"trecho {self.end - self.start:.1f}s de {self.dur:.1f}s")
+                         text=t("selection", sel=self.end - self.start, total=self.dur))
         self._head = self.create_line(0, 0, 0, h, fill=self.HEAD, state="hidden")
         self.set_pos(self.pos)
 

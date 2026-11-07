@@ -6,6 +6,7 @@ import numpy as np
 import sounddevice as sd
 
 from .codec import SR, decode
+from .i18n import t
 
 BLOCK = 480  # 10 ms
 MAX_LAG = SR // 4  # descarta audio acumulado alem de 250 ms
@@ -79,6 +80,12 @@ class Engine:
     def remove(self, cid):
         with self.lock:
             self.channels.pop(cid, None)
+
+    def rekey(self, old, new):
+        """Passa o canal para outro id sem interromper o som."""
+        with self.lock:
+            if old in self.channels:
+                self.channels[new] = self.channels.pop(old)
 
     def has(self, cid):
         return cid in self.channels
@@ -173,7 +180,7 @@ class Engine:
     def open(self, mic_idx, out_idx, mon_idx):
         self.close()
         if out_idx is None:
-            raise RuntimeError("Selecione o dispositivo de saida (cabo virtual).")
+            raise RuntimeError(t("select_output"))
         try:
             if mic_idx is not None:
                 self.streams.append(sd.InputStream(

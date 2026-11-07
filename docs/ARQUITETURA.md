@@ -52,6 +52,7 @@ sound-mod/
     ├── engine.py           # mixer e streams de áudio
     ├── recorder.py         # loopback + buffer circular + salvar mp3
     ├── hotkeys.py          # registro de hotkeys globais e captura de tecla
+    ├── i18n.py             # textos em cada idioma, t(chave), detecção do idioma do Windows
     ├── widgets.py          # ScrollFrame, KeyButton (botão dividido), Waveform
     └── gui.py              # interface (App, SlotRow)
 ```
@@ -61,8 +62,8 @@ sound-mod/
 ### 3.1 `config.py`
 - `load()` mescla `DEFAULTS` com `config.json`; ignora arquivo ausente/corrompido.
 - `save(cfg)` grava JSON UTF-8.
-- Campos: `mic_device`, `output_device`, `monitor_device`, `loopback_device` (nomes de dispositivo), `mix_mic`, `monitor`, `master_volume`, `clip_seconds`, `clip_trim` (`[início, fim]` em s do trecho do clipe, ou `null` = inteiro), `save_clip_key`, `play_clip_key`, `stop_key`, `slots` (lista de `{key, path, volume}`).
-- Dispositivos são guardados **por nome** (índices mudam entre sessões).
+- Campos: `language` (`"pt"`, `"en"` ou `null` = idioma do Windows), `mic_device`, `output_device`, `monitor_device`, `loopback_device` (nomes de dispositivo), `mix_mic`, `monitor`, `master_volume`, `clip_seconds`, `clip_trim` (`[início, fim]` em s do trecho do clipe, ou `null` = inteiro), `save_clip_key`, `play_clip_key`, `stop_key`, `slots` (lista de `{key, path, volume}`).
+- Dispositivos são guardados **por nome** (índices mudam entre sessões). `null` = escolher automaticamente, `""` = nenhum. O texto antigo `"(nenhum)"` de configs anteriores ainda é aceito.
 
 ### 3.2 `codec.py`
 - Formato interno único: **float32, estéreo, 48 kHz**, shape `(N, 2)`.
@@ -90,6 +91,7 @@ Os streams abrem com `open(mic, saida, monitor)` e fecham com `close()`.
 | `pause(cid)` | alterna pausa/continuar (parado no início: nada); continuar também para os outros canais |
 | `stop(cid)` / `stop_all()` | para e volta `pos` ao início do trecho |
 | `seek(cid, s)` | move `pos`, limitado ao trecho |
+| `rekey(antigo, novo)` | passa o canal para outro id sem interromper o som (usado ao recriar a janela) |
 | `set_gain`, `set_range(cid, ini, fim)` | volume ao vivo, corte do trecho |
 | `state(cid)` | `(pos_s, duração_total_s, tocando)` para a GUI |
 
@@ -127,9 +129,16 @@ Classe `LoopbackRecorder`.
 - `ScrollFrame`: Canvas + `CTkScrollbar` próprio. **Não usar `CTkScrollableFrame`**, que trava no Python 3.15.
 - `KeyButton`: três botões lado a lado. O principal (`ícone + TECLA`) executa a ação; o ✎ chama a captura de tecla; o ⌫ remove a tecla (fica desativado quando não há tecla). `capturing()`, `set_key()`, `set_active()`.
 - `Waveform` (`tk.Canvas`): reduz o áudio a ~2000 picos e desenha uma coluna por pixel, normalizada. O trecho selecionado fica em azul, o resto em cinza. As alças laranjas (início/fim) são arrastáveis e chamam `on_range(ini, fim)` ao soltar; clicar no meio chama `on_seek(t)`. O cursor branco é movido por `set_pos(t)` sem redesenhar a onda.
-- **Cuidado:** nunca atribuir atributos `master`, `children`, `tk`, etc. em subclasses de widgets tkinter (um bug assim já gerou loop infinito em `_root`).
+- **Cuidado:** nunca criar atributos ou métodos com nomes do tkinter em subclasses de widgets (`master`, `children`, `tk`, `_unbind`, etc.). Atribuir `master` já gerou loop infinito em `_root`, e um método `_unbind` no `App` já quebrou o `unbind_all`.
 - Toda atualização de widget vinda de outra thread passa por `self.after(0, ...)` (`_say`).
 - `_start_all()` (botão "Aplicar / Reiniciar" e início automático): lê a UI → `cfg`, reinicia `Engine` e `Recorder`, registra hotkeys, salva config e pré-carrega os arquivos em threads.
+
+### 3.8 `i18n.py`
+- `TEXTS[idioma][chave]` guarda todos os textos da interface e das mensagens; `t("chave", valor=...)` devolve o texto no idioma atual. O idioma é global ao módulo.
+- `set_language(None)` usa `detect()`: português se o Windows estiver em português, senão inglês.
+- **Adicionar um idioma:** incluir em `LANGUAGES` e em `TEXTS`, com as mesmas chaves e os mesmos campos `{...}`.
+- **Novo texto na interface:** nunca escrever o texto direto no código; criar a chave em todos os idiomas.
+- **Cuidado:** dentro de uma função que chama `t()`, não usar `t` como variável local (ex.: tempo), porque isso esconde a função.
 
 ## 4. Fluxos principais
 
@@ -147,9 +156,11 @@ Classe `LoopbackRecorder`.
 
 **Parar tudo (F12):** `engine.stop_all()`.
 
+**Trocar idioma:** menu → `_on_language` → `_change_language`: `_read_ui` guarda o que está na janela, os widgets são destruídos e `_build` recria tudo no novo idioma. `engine.rekey` passa cada canal para a nova `SlotRow`, então o som não para. Bloqueado enquanto uma tecla está sendo capturada.
+
 **Trocar tecla:** `_rebind` limpa as hotkeys → `capture_key` em thread → `_rebound` grava no `cfg`, registra de novo e salva o `config.json`.
 
-**Remover tecla (⌫):** `_unbind` → `_rebound(..., "")`: a ação fica sem hotkey, mas o botão continua funcionando com o mouse.
+**Remover tecla (⌫):** `_clear_key` → `_set_key(..., "")`: a ação fica sem hotkey, mas o botão continua funcionando com o mouse.
 
 ## 5. Threads
 
@@ -201,4 +212,4 @@ python -m venv .venv
 Dicas:
 - Teste scripts que podem travar com `faulthandler.dump_traceback_later(15, exit=True)` e `python -u`.
 - Para listar dispositivos: `sounddevice.query_devices()` e `PyAudio().get_loopback_device_info_generator()`.
-- Convenções: nomes e mensagens de status em português; cada módulo com uma responsabilidade; sem acesso à GUI fora da thread principal.
+- Convenções: comentários em português; textos da interface sempre via `i18n.t()`; cada módulo com uma responsabilidade; sem acesso à GUI fora da thread principal.

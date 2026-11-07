@@ -5,15 +5,16 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from . import config
+from . import config, i18n
 from .codec import SR
 from .engine import Engine, wasapi_devices
 from .hotkeys import HotkeyManager, capture_key
+from .i18n import t
 from .recorder import LoopbackRecorder, loopback_names
 from .widgets import KeyButton, ScrollFrame, Waveform
 
-AUDIO_TYPES = [("Audio", "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.wma"), ("Todos", "*.*")]
-NONE = "(nenhum)"
+AUDIO_GLOB = "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.wma"
+LEGACY_NONE = "(nenhum)"  # config.json antigos guardavam o texto em vez de ""
 CLIP = "clip"  # id do canal do clipe no engine
 
 
@@ -36,9 +37,9 @@ class SlotRow:
         p = app.list
         set_key = lambda k: slot.__setitem__("key", k)
         self.key = KeyButton(p, "▶", slot["key"], lambda: app._toggle_slot(self),
-                             lambda kb: app._rebind(kb, set_key), lambda kb: app._unbind(kb, set_key))
-        self.file_btn = ctk.CTkButton(p, text="Arquivo...", width=78, command=lambda: app._pick(self))
-        self.name = ctk.CTkLabel(p, text=short(Path(slot["path"]).name) or "(sem arquivo)", anchor="w")
+                             lambda kb: app._rebind(kb, set_key), lambda kb: app._clear_key(kb, set_key))
+        self.file_btn = ctk.CTkButton(p, text=t("file"), width=78, command=lambda: app._pick(self))
+        self.name = ctk.CTkLabel(p, text=short(Path(slot["path"]).name) or t("no_file"), anchor="w")
         self.time = ctk.CTkLabel(p, text="-:-- / -:--", width=84, text_color="gray70")
         self.progress = ctk.CTkSlider(p, from_=0, to=1, width=170, command=self._seek)
         self.progress.set(0)
@@ -96,11 +97,13 @@ class App(ctk.CTk):
         self.minsize(940, 620)
 
         self.cfg = config.load()
+        i18n.set_language(self.cfg["language"])
         self.engine = Engine()
         self.recorder = LoopbackRecorder(self.cfg["clip_seconds"])
         self.hotkeys = HotkeyManager()
         self.rows = []
         self.clip_active = False
+        self.capturing_key = False
 
         self.ins, self.outs = wasapi_devices()
         self._build()
@@ -124,17 +127,19 @@ class App(ctk.CTk):
         cable = next((n for n in out_names if "CABLE Input" in n), None)
         self.cable_found = cable is not None
 
-        self.mic_var = ctk.StringVar(value=self.cfg["mic_device"] or self._default(in_names, "Microfone"))
-        self.out_var = ctk.StringVar(value=self.cfg["output_device"] or cable or NONE)
-        phones = next((n for n in out_names if "CABLE" not in n), NONE)
-        self.mon_var = ctk.StringVar(value=self.cfg["monitor_device"] or phones)
-        self.loop_var = ctk.StringVar(value=self.cfg["loopback_device"] or "(alto-falante padrao)")
+        none = t("none")
+        mic = next((n for n in in_names if "micro" in n.lower()), none)
+        phones = next((n for n in out_names if "CABLE" not in n), none)
+        self.mic_var = ctk.StringVar(value=self._saved_device("mic_device", mic))
+        self.out_var = ctk.StringVar(value=self._saved_device("output_device", cable or none))
+        self.mon_var = ctk.StringVar(value=self._saved_device("monitor_device", phones))
+        self.loop_var = ctk.StringVar(value=self.cfg["loopback_device"] or t("default_speaker"))
 
         rows = [
-            ("Microfone real", self.mic_var, [NONE] + in_names),
-            ("Saida -> cabo virtual", self.out_var, [NONE] + out_names),
-            ("Ouvir sons em (fones)", self.mon_var, [NONE] + out_names),
-            ("Capturar audio do PC", self.loop_var, ["(alto-falante padrao)"] + self._safe(loopback_names)),
+            (t("mic"), self.mic_var, [none] + in_names),
+            (t("output"), self.out_var, [none] + out_names),
+            (t("monitor"), self.mon_var, [none] + out_names),
+            (t("loopback"), self.loop_var, [t("default_speaker")] + self._safe(loopback_names)),
         ]
         for r, (label, var, values) in enumerate(rows):
             ctk.CTkLabel(dev, text=label, anchor="w").grid(row=r, column=0, padx=10, pady=4, sticky="w")
@@ -145,22 +150,23 @@ class App(ctk.CTk):
         opts.grid(row=4, column=0, columnspan=2, sticky="ew", padx=6, pady=(4, 8))
         self.mix_var = ctk.BooleanVar(value=self.cfg["mix_mic"])
         self.monitor_var = ctk.BooleanVar(value=self.cfg["monitor"])
-        ctk.CTkCheckBox(opts, text="Misturar meu microfone", variable=self.mix_var,
+        ctk.CTkCheckBox(opts, text=t("mix_mic"), variable=self.mix_var,
                         command=self._apply_live).pack(side="left", padx=8)
-        ctk.CTkCheckBox(opts, text="Ouvir os sons", variable=self.monitor_var,
+        ctk.CTkCheckBox(opts, text=t("hear_sounds"), variable=self.monitor_var,
                         command=self._apply_live).pack(side="left", padx=8)
-        ctk.CTkLabel(opts, text="Volume geral").pack(side="left", padx=(16, 4))
+        ctk.CTkLabel(opts, text=t("master_volume")).pack(side="left", padx=(16, 4))
         self.vol_slider = ctk.CTkSlider(opts, from_=0, to=1, width=120, command=lambda v: self._apply_live())
         self.vol_slider.set(self.cfg["master_volume"])
         self.vol_slider.pack(side="left")
-        ctk.CTkButton(opts, text="Aplicar / Reiniciar", width=140, command=self._start_all
+        ctk.CTkButton(opts, text=t("apply"), width=140, command=self._start_all
                       ).pack(side="right", padx=8)
+        self.lang_var = ctk.StringVar(value=i18n.LANGUAGES[i18n.current()])
+        ctk.CTkOptionMenu(opts, variable=self.lang_var, values=list(i18n.LANGUAGES.values()), width=110,
+                          command=self._on_language).pack(side="right", padx=8)
 
         if not self.cable_found:
             ctk.CTkLabel(
-                self, text_color="#e6a23c", wraplength=780, justify="left",
-                text="Cabo virtual nao encontrado. Instale o VB-CABLE (vb-audio.com/Cable), reinicie o app e "
-                     "use 'CABLE Output' como microfone no Discord/jogo.",
+                self, text_color="#e6a23c", wraplength=780, justify="left", text=t("no_cable"),
             ).grid(row=1, column=0, sticky="w", padx=14, pady=2)
 
         # sons
@@ -170,9 +176,9 @@ class App(ctk.CTk):
         box.grid_rowconfigure(1, weight=1)
         head = ctk.CTkFrame(box, fg_color="transparent")
         head.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
-        ctk.CTkLabel(head, text="Sons", font=ctk.CTkFont(size=15, weight="bold")).pack(side="left", padx=6)
-        ctk.CTkLabel(head, text="▶ toca/para  ·  ✎ muda a tecla  ·  ⌫ remove a tecla  ·  um som por vez", text_color="gray60").pack(side="left", padx=10)
-        ctk.CTkButton(head, text="+ Adicionar som", width=130, command=self._add_slot).pack(side="right")
+        ctk.CTkLabel(head, text=t("sounds"), font=ctk.CTkFont(size=15, weight="bold")).pack(side="left", padx=6)
+        ctk.CTkLabel(head, text=t("sounds_hint"), text_color="gray60").pack(side="left", padx=10)
+        ctk.CTkButton(head, text=t("add_sound"), width=130, command=self._add_slot).pack(side="right")
         scroll = ScrollFrame(box)
         scroll.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
         self.list = scroll.inner
@@ -184,34 +190,33 @@ class App(ctk.CTk):
         clip = ctk.CTkFrame(self)
         clip.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
         clip.grid_columnconfigure(8, weight=1)
-        ctk.CTkLabel(clip, text="Salvar ultimos").grid(row=0, column=0, padx=(10, 4), pady=8)
+        ctk.CTkLabel(clip, text=t("save_last")).grid(row=0, column=0, padx=(10, 4), pady=8)
         self.secs = ctk.CTkEntry(clip, width=40)
         self.secs.insert(0, str(self.cfg["clip_seconds"]))
         self.secs.grid(row=0, column=1, padx=2)
-        ctk.CTkLabel(clip, text="seg").grid(row=0, column=2, padx=(2, 6))
+        ctk.CTkLabel(clip, text=t("seconds")).grid(row=0, column=2, padx=(2, 6))
         self.save_key = self._cfg_key_button(clip, "●", "save_clip_key", self._save_clip)
         self.save_key.grid(row=0, column=3, padx=(0, 16))
-        ctk.CTkLabel(clip, text="Clipe").grid(row=0, column=4, padx=(0, 4))
+        ctk.CTkLabel(clip, text=t("clip")).grid(row=0, column=4, padx=(0, 4))
         self.clip_key = self._cfg_key_button(clip, "▶", "play_clip_key", self._toggle_clip)
         self.clip_key.grid(row=0, column=5, padx=(0, 4))
         ctk.CTkButton(clip, text="⏸", width=30, command=lambda: self.engine.pause(CLIP)).grid(row=0, column=6, padx=2)
         ctk.CTkButton(clip, text="■", width=30, command=lambda: self.engine.stop(CLIP)).grid(row=0, column=7, padx=2)
-        ctk.CTkLabel(clip, text="Parar tudo").grid(row=0, column=9, padx=(0, 4))
+        ctk.CTkLabel(clip, text=t("stop_all")).grid(row=0, column=9, padx=(0, 4))
         self.stop_key = self._cfg_key_button(clip, "■", "stop_key", self.engine.stop_all)
         self.stop_key.grid(row=0, column=10, padx=(0, 10))
         self.wave = Waveform(clip, self._clip_range, self._clip_seek)
         self.wave.grid(row=1, column=0, columnspan=11, sticky="ew", padx=10, pady=(0, 4))
-        ctk.CTkLabel(clip, text_color="gray60", text="Arraste as alcas laranjas para escolher o trecho que toca; "
-                                                     "clique na onda para mudar a posicao.").grid(
+        ctk.CTkLabel(clip, text_color="gray60", text=t("clip_hint")).grid(
             row=2, column=0, columnspan=11, sticky="w", padx=10, pady=(0, 6))
 
-        self.status = ctk.CTkLabel(self, text="Pronto.", anchor="w")
+        self.status = ctk.CTkLabel(self, text=t("ready"), anchor="w")
         self.status.grid(row=4, column=0, sticky="ew", padx=14, pady=(2, 10))
 
     def _cfg_key_button(self, parent, icon, cfg_key, action):
         set_key = lambda k: self.cfg.__setitem__(cfg_key, k)
         return KeyButton(parent, icon, self.cfg[cfg_key], action,
-                         lambda kb: self._rebind(kb, set_key), lambda kb: self._unbind(kb, set_key))
+                         lambda kb: self._rebind(kb, set_key), lambda kb: self._clear_key(kb, set_key))
 
     def _add_row(self, slot):
         row = SlotRow(self, slot)
@@ -227,9 +232,11 @@ class App(ctk.CTk):
         except Exception:
             return []
 
-    @staticmethod
-    def _default(names, hint):
-        return next((n for n in names if hint.lower() in n.lower()), NONE)
+    def _saved_device(self, key, default):
+        value = self.cfg[key]
+        if value is None:
+            return default
+        return value if value and value != LEGACY_NONE else t("none")
 
     def _say(self, msg):
         self.after(0, lambda: self.status.configure(text=msg))
@@ -260,7 +267,7 @@ class App(ctk.CTk):
         self._register_hotkeys()
 
     def _pick(self, row):
-        path = filedialog.askopenfilename(filetypes=AUDIO_TYPES)
+        path = filedialog.askopenfilename(filetypes=[(t("audio_files"), AUDIO_GLOB), (t("all_files"), "*.*")])
         if not path:
             return
         row.slot["path"] = path
@@ -273,26 +280,26 @@ class App(ctk.CTk):
         try:
             self.engine.set_sound(row, path, row.slot["volume"])
             if not quiet:
-                self._say(f"Carregado: {Path(path).name}")
+                self._say(t("loaded", name=Path(path).name))
             return True
         except Exception as e:
-            self._say(f"Erro ao carregar {Path(path).name}: {e}")
+            self._say(t("load_error", name=Path(path).name, e=e))
             return False
 
     def _play_slot(self, row, toggle=False):
         """▶: toca (recomeca se ja tocava). Hotkey/botao da tecla (toggle): toca ou, se ja tocava, para."""
         name = Path(row.slot["path"]).name
         if not name:
-            return self._say("Esse slot nao tem arquivo.")
+            return self._say(t("slot_empty"))
         if not self.engine.running:
-            return self._say("Engine parada: escolha a saida e clique em Aplicar.")
+            return self._say(t("engine_stopped"))
         playing = self.engine.toggle(row) if toggle else self.engine.play(row)
         if playing is not None:
-            return self._say(f"Tocando: {name}" if playing else f"Parado: {name}")
+            return self._say(t("playing" if playing else "stopped", name=name))
 
         def work():  # ainda nao carregado
             if self._load_slot(row, quiet=True) and self.engine.play(row):
-                self._say(f"Tocando: {name}")
+                self._say(t("playing", name=name))
         threading.Thread(target=work, daemon=True).start()
 
     def _toggle_slot(self, row):
@@ -300,6 +307,7 @@ class App(ctk.CTk):
 
     def _rebind(self, kb, setter):
         kb.capturing()
+        self.capturing_key = True
         self.hotkeys.clear()
 
         def work():
@@ -312,14 +320,47 @@ class App(ctk.CTk):
         threading.Thread(target=work, daemon=True).start()
 
     def _rebound(self, kb, setter, key):
+        self.capturing_key = False
+        self._set_key(kb, setter, key)
+
+    def _set_key(self, kb, setter, key):
         setter(key)
         kb.set_key(key)
         self._register_hotkeys()
         config.save(self.cfg)
 
-    def _unbind(self, kb, setter):
-        self._rebound(kb, setter, "")
-        self._say("Tecla removida.")
+    def _clear_key(self, kb, setter):
+        self._set_key(kb, setter, "")
+        self._say(t("key_removed"))
+
+    # ---------- idioma ----------
+    def _on_language(self, label):
+        lang = next(code for code, name in i18n.LANGUAGES.items() if name == label)
+        if lang != i18n.current():
+            # adiado: o menu nao pode ser destruido dentro do proprio callback
+            self.after(10, lambda: self._change_language(lang))
+
+    def _change_language(self, lang):
+        """Recria a janela no novo idioma; os canais passam para as novas linhas e o som nao para."""
+        if self.capturing_key:
+            self.lang_var.set(i18n.LANGUAGES[i18n.current()])
+            return self._say(t("finish_key_first"))
+        self._read_ui()
+        self.cfg["language"] = lang
+        i18n.set_language(lang)
+        old_rows = self.rows
+        for w in self.winfo_children():
+            w.destroy()
+        self.rows = []
+        self.clip_active = False
+        self._build()
+        for old, new in zip(old_rows, self.rows):
+            self.engine.rekey(old, new)
+        if self.engine.has(CLIP):
+            self._show_clip(self.engine.load(config.CLIP_PATH), False)
+        self._register_hotkeys()
+        self._load_missing()
+        config.save(self.cfg)
 
     # ---------- clipe ----------
     def _save_clip(self):
@@ -327,9 +368,9 @@ class App(ctk.CTk):
             try:
                 dur = self.recorder.save(config.CLIP_PATH)
             except Exception as e:
-                return self._say(f"Erro ao salvar clipe: {e}")
+                return self._say(t("clip_save_error", e=e))
             if self._load_clip(reset_trim=True):
-                self._say(f"Clipe salvo ({dur:.1f}s): {config.CLIP_PATH.name}")
+                self._say(t("clip_saved", dur=dur, name=config.CLIP_PATH.name))
         threading.Thread(target=work, daemon=True).start()
 
     def _load_clip(self, reset_trim):
@@ -339,7 +380,7 @@ class App(ctk.CTk):
             self.engine.set_sound(CLIP, config.CLIP_PATH)
             data = self.engine.load(config.CLIP_PATH)
         except Exception as e:
-            self._say(f"Erro ao abrir clipe: {e}")
+            self._say(t("clip_open_error", e=e))
             return False
         self.after(0, lambda: self._show_clip(data, reset_trim))
         return True
@@ -362,10 +403,10 @@ class App(ctk.CTk):
 
     def _toggle_clip(self):
         if not self.engine.has(CLIP):
-            return self._say("Ainda nao ha clipe salvo.")
+            return self._say(t("no_clip_saved"))
         if not self.engine.running:
-            return self._say("Engine parada: escolha a saida e clique em Aplicar.")
-        self._say("Tocando clipe" if self.engine.toggle(CLIP) else "Clipe parado")
+            return self._say(t("engine_stopped"))
+        self._say(t("clip_playing" if self.engine.toggle(CLIP) else "clip_stopped"))
 
     # ---------- engine ----------
     def _apply_live(self):
@@ -376,11 +417,12 @@ class App(ctk.CTk):
     def _idx(self, items, name):
         return next((i for i, n in items if n == name), None)
 
-    def _start_all(self):
-        self._apply_live()
-        self.cfg["mic_device"] = self.mic_var.get()
-        self.cfg["output_device"] = self.out_var.get()
-        self.cfg["monitor_device"] = self.mon_var.get()
+    def _read_ui(self):
+        """Copia para o cfg o que esta nos controles da janela."""
+        none = t("none")
+        self.cfg["mic_device"] = "" if self.mic_var.get() == none else self.mic_var.get()
+        self.cfg["output_device"] = "" if self.out_var.get() == none else self.out_var.get()
+        self.cfg["monitor_device"] = "" if self.mon_var.get() == none else self.mon_var.get()
         loop = self.loop_var.get()
         self.cfg["loopback_device"] = None if loop.startswith("(") else loop
         self.cfg["mix_mic"] = self.mix_var.get()
@@ -393,32 +435,40 @@ class App(ctk.CTk):
         self.cfg["clip_seconds"] = secs
         self.recorder.seconds = secs
 
+    def _load_missing(self):
+        for row in self.rows:
+            if row.slot["path"] and not self.engine.has(row):
+                threading.Thread(target=self._load_slot, args=(row, True), daemon=True).start()
+
+    def _start_all(self):
+        self._apply_live()
+        self._read_ui()
+
         msgs = []
+        none = t("none")
         out, mon = self.out_var.get(), self.mon_var.get()
-        if out != NONE and "CABLE" not in out:
-            msgs.append("AVISO: a saida deve ser o cabo virtual (CABLE Input)")
-        if mon == out or "CABLE" in mon:
+        if out != none and "CABLE" not in out:
+            msgs.append(t("warn_output"))
+        if mon != none and (mon == out or "CABLE" in mon):
             # monitor no cabo duplica os sons no microfone (eco) e voce nao ouve nada
-            msgs.append("monitor desligado: escolha seus fones em 'Ouvir sons em'")
-            mon = NONE
+            msgs.append(t("monitor_off"))
+            mon = none
         try:
             self.engine.open(self._idx(self.ins, self.mic_var.get()),
                              self._idx(self.outs, out),
                              self._idx(self.outs, mon))
-            msgs.append("audio ligado")
+            msgs.append(t("audio_on"))
         except Exception as e:
-            msgs.append(f"audio: {e}")
+            msgs.append(t("audio_error", e=e))
         try:
             self.recorder.start(self.cfg["loopback_device"])
-            msgs.append("gravacao do PC ligada")
+            msgs.append(t("capture_on"))
         except Exception as e:
-            msgs.append(f"loopback: {e}")
+            msgs.append(t("capture_error", e=e))
 
         self._register_hotkeys()
         config.save(self.cfg)
-        for row in self.rows:
-            if row.slot["path"] and not self.engine.has(row):
-                threading.Thread(target=self._load_slot, args=(row, True), daemon=True).start()
+        self._load_missing()
         self.status.configure(text=" | ".join(msgs))
 
     def _register_hotkeys(self):
@@ -430,7 +480,7 @@ class App(ctk.CTk):
         ]
         errors = self.hotkeys.register(mapping)
         if errors:
-            self._say("Tecla invalida: " + "; ".join(errors))
+            self._say(t("invalid_key", keys="; ".join(errors)))
 
     def _close(self):
         try:

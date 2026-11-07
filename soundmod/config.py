@@ -12,6 +12,8 @@ CLIPS_DIR = ROOT / "clips"
 CLIP_PATH = CLIPS_DIR / "last_clip.mp3"
 
 DEFAULTS = {
+    "language": None,          # "pt", "en" ou None = idioma do Windows
+    # dispositivos: None = escolher automaticamente, "" = nenhum
     "mic_device": None,        # nome do microfone real
     "output_device": None,     # nome do cabo virtual (CABLE Input)
     "monitor_device": None,    # onde VOCE ouve os sons (fones)

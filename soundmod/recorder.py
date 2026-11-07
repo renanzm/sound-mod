@@ -11,6 +11,7 @@ import numpy as np
 import pyaudiowpatch as pyaudio
 
 from .codec import encode_mp3
+from .i18n import t
 
 CHUNK = 1024
 
@@ -99,7 +100,7 @@ class LoopbackRecorder:
         """Salva os ultimos N segundos em mp3. Retorna a duracao em segundos."""
         with self.lock:
             if not self.chunks:
-                raise RuntimeError("Nada gravado ainda (sem audio tocando no PC).")
+                raise RuntimeError(t("nothing_recorded"))
             pcm = np.concatenate(list(self.chunks))
         pcm = pcm[-int(self.seconds * self.rate):]
         encode_mp3(pcm, self.rate, self.channels, out_path)
