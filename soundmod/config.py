@@ -10,6 +10,7 @@ else:
 CONFIG_PATH = ROOT / "config.json"
 CLIPS_DIR = ROOT / "clips"
 CLIP_PATH = CLIPS_DIR / "last_clip.mp3"
+SOUNDS_DIR = ROOT / "sounds"  # clipes salvos como som
 
 DEFAULTS = {
     "language": None,          # "pt", "en" ou None = idioma do Windows
@@ -22,6 +23,8 @@ DEFAULTS = {
     "monitor": True,
     "master_volume": 1.0,
     "clip_seconds": 5,
+    "voice_effect": "normal",  # ver voice.EFFECTS
+    "hear_self": False,        # ouvir a propria voz (com efeito) nos fones
     "clip_trim": None,         # [inicio, fim] em s do trecho do clipe que toca
 
     "save_clip_key": "f5",
@@ -43,6 +46,12 @@ def load():
     except (OSError, ValueError):
         pass
     return cfg
+
+
+def resolve(path):
+    """Caminhos relativos (ex.: sons salvos em sounds/) sao relativos a pasta do programa."""
+    p = Path(path)
+    return p if p.is_absolute() else ROOT / p
 
 
 def save(cfg):

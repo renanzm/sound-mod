@@ -13,7 +13,9 @@ Também grava os **últimos segundos do áudio do PC** (padrão 5 s) para você 
 - **Qualquer formato**: mp3, wav, ogg, flac, m4a, aac... (ffmpeg embutido, nada extra para instalar).
 - **Controle por som**: ▶ tocar, ⏸ pausar/continuar, ■ parar, barra de progresso arrastável (avançar/voltar) e volume individual ao vivo.
 - **Um som por vez**: tocar um som interrompe o atual.
-- **Clipe do áudio do PC**: uma tecla salva os últimos N segundos em `clips/last_clip.mp3`; outra toca. A forma de onda permite **escolher o trecho** que será reproduzido.
+- **Vários arquivos de uma vez**: o **+ Adicionar som** aceita vários arquivos; eles ocupam primeiro os slots vazios.
+- **Efeitos de voz**: Grave, Agudo, Robô, Ogro, Autotune, Eco, Rádio e Alien, aplicados ao vivo no seu microfone. Ligue **Ouvir minha voz** para escutar como você está saindo.
+- **Clipe do áudio do PC**: uma tecla salva os últimos N segundos em `clips/last_clip.mp3`; outra toca. A forma de onda permite **escolher o trecho** que será reproduzido, e **Salvar como som** guarda esse trecho como um som novo na lista (na pasta `sounds/`).
 - **Monitor nos fones**: você ouve os sons enquanto eles saem no microfone.
 - **Português e inglês**: segue o idioma do Windows, e você pode trocar quando quiser no app.
 - Interface gráfica escura e leve (customtkinter).
@@ -47,17 +49,18 @@ python -m venv .venv
 1. **Microfone real**: seu microfone físico. **Saída → cabo virtual**: `CABLE Input`. **Ouvir sons em**: seus fones (não escolha o cabo aqui).
 2. No Discord/jogo, escolha **CABLE Output** como microfone. No Discord, desligue supressão de ruído, cancelamento de eco e controle automático de ganho, que costumam cortar efeitos sonoros.
 3. Atribua arquivos aos slots. Cada botão de tecla é dividido: **▶ F1** toca e, apertado de novo, para; **✎** muda a tecla; **⌫** remove a tecla.
-   Só um som toca por vez: tocar outro interrompe o atual.
-4. **F5** salva os últimos N segundos do áudio do PC e mostra a forma de onda; arraste as alças laranjas para escolher o trecho. **F6** toca o trecho. **F12** para tudo.
+   Só um som toca por vez: tocar outro interrompe o atual. O **+ Adicionar som** permite escolher vários arquivos de uma vez.
+4. **F5** salva os últimos N segundos do áudio do PC e mostra a forma de onda; arraste as alças laranjas para escolher o trecho. **F6** toca o trecho. **F12** para tudo. **Salvar como som** pede um nome e adiciona o trecho escolhido aos seus sons.
+5. **Efeito de voz**: escolha um efeito na barra abaixo dos dispositivos. Ele muda seu microfone ao vivo; **Normal** desliga. Marque **Ouvir minha voz** para se escutar nos fones.
 
-Para trocar o idioma, use o menu ao lado de **Aplicar / Reiniciar**. As configurações ficam em `config.json` ao lado do programa.
+Para trocar o idioma, use o menu ao lado de **Aplicar / Reiniciar**. As configurações ficam em `config.json` ao lado do programa, e os clipes salvos na pasta `sounds`. Ao atualizar, copie `config.json`, `clips` e `sounds` para a pasta nova.
 
 ## Gerar o executável
 
 ```
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
-Gera `dist\SoundMod\SoundMod.exe` (use `-OneFile` para um único `.exe`). Feche o app antes de compilar. O `config.json` e a pasta `clips\` são preservados ao recompilar.
+Gera `dist\SoundMod\SoundMod.exe` (use `-OneFile` para um único `.exe`). Feche o app antes de compilar. O `config.json` e as pastas `clips\` e `sounds\` são preservados ao recompilar.
 
 ## Documentação
 

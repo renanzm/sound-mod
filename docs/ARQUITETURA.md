@@ -45,11 +45,13 @@ sound-mod/
 ├── requirements.txt
 ├── config.json             # gerado em runtime (ignorado pelo git)
 ├── clips/last_clip.mp3     # clipe do F5 (ignorado pelo git)
+├── sounds/                 # clipes salvos como som (ignorado pelo git)
 ├── docs/ARQUITETURA.md     # este documento
 └── soundmod/
     ├── config.py           # carrega/salva config.json, caminhos
     ├── codec.py            # ffmpeg: decode() e encode_mp3()
     ├── engine.py           # mixer e streams de áudio
+    ├── voice.py            # efeitos de voz em tempo real (pitch, robô, autotune...)
     ├── recorder.py         # loopback + buffer circular + salvar mp3
     ├── hotkeys.py          # registro de hotkeys globais e captura de tecla
     ├── i18n.py             # textos em cada idioma, t(chave), detecção do idioma do Windows
@@ -62,7 +64,8 @@ sound-mod/
 ### 3.1 `config.py`
 - `load()` mescla `DEFAULTS` com `config.json`; ignora arquivo ausente/corrompido.
 - `save(cfg)` grava JSON UTF-8.
-- Campos: `language` (`"pt"`, `"en"` ou `null` = idioma do Windows), `mic_device`, `output_device`, `monitor_device`, `loopback_device` (nomes de dispositivo), `mix_mic`, `monitor`, `master_volume`, `clip_seconds`, `clip_trim` (`[início, fim]` em s do trecho do clipe, ou `null` = inteiro), `save_clip_key`, `play_clip_key`, `stop_key`, `slots` (lista de `{key, path, volume}`).
+- Campos: `language` (`"pt"`, `"en"` ou `null` = idioma do Windows), `mic_device`, `output_device`, `monitor_device`, `loopback_device` (nomes de dispositivo), `mix_mic`, `monitor`, `master_volume`, `clip_seconds`, `voice_effect` (nome em `voice.EFFECTS`), `hear_self`, `clip_trim` (`[início, fim]` em s do trecho do clipe, ou `null` = inteiro), `save_clip_key`, `play_clip_key`, `stop_key`, `slots` (lista de `{key, path, volume}`).
+- `slots[].path` pode ser relativo à pasta do programa (`sounds/x.mp3`, usado pelos clipes salvos); `resolve(path)` devolve o caminho absoluto. Assim a pasta pode ser copiada numa atualização sem quebrar os caminhos.
 - Dispositivos são guardados **por nome** (índices mudam entre sessões). `null` = escolher automaticamente, `""` = nenhum. O texto antigo `"(nenhum)"` de configs anteriores ainda é aceito.
 
 ### 3.2 `codec.py`
@@ -77,7 +80,9 @@ Classe `Engine`, no coração do app.
 **Streams** (todos a 48 kHz, bloco de 480 frames = 10 ms, WASAPI com `auto_convert=True`):
 1. `InputStream` do microfone (mono) → `_mic_cb` empilha em `mic_buf`.
 2. `OutputStream` para o cabo virtual → `_out_cb` mixa sons + mic e escreve a saída.
-3. `OutputStream` opcional de monitor (fones) → `_mon_cb` consome `mon_buf`, alimentado pelo `_out_cb` apenas com os sons (sem o mic, para você não se ouvir).
+3. `OutputStream` opcional de monitor (fones) → `_mon_cb` consome `mon_buf`, alimentado pelo `_out_cb` com os sons e, só se `hear_self` estiver ligado, com a voz já processada.
+
+**Voz:** `_pull_mic` tira um bloco de `mic_buf` e aplica `self.voice` (efeito de `voice.make`, ou `None`). `set_voice(nome)` troca o objeto inteiro, sem lock: o callback lê a referência uma vez por bloco. Se o efeito lançar exceção, ele é desligado para não derrubar o stream.
 
 Os streams abrem com `open(mic, saida, monitor)` e fecham com `close()`.
 
@@ -122,7 +127,8 @@ Classe `LoopbackRecorder`.
 ### 3.6 `gui.py`
 - `App(ctk.CTk)`: seções de dispositivos, lista de slots, área do clipe e barra de status.
 - **`SlotRow`** (uma por slot, e é o id do canal no engine): `KeyButton` (▶ toca / ✎ muda a tecla), "Arquivo...", nome, tempo `m:ss / m:ss`, slider de progresso (arrastar = `seek`), slider de volume (0–1,5, ao vivo), ▶ ⏸ ■ e ✕.
-- **Área do clipe:** segundos + `KeyButton` de salvar (●), `KeyButton` do clipe (▶) com ⏸ ■, `KeyButton` de parar tudo e a `Waveform` com o corte.
+- **Linha de voz** (no quadro de dispositivos): `CTkSegmentedButton` com os efeitos (`fx_names` mapeia o texto traduzido para o nome interno) e a caixa "Ouvir minha voz".
+- **Área do clipe:** segundos + `KeyButton` de salvar (●), `KeyButton` do clipe (▶) com ⏸ ■, "Salvar como som", `KeyButton` de parar tudo e a `Waveform` com o corte.
 - **`_tick`** (a cada 100 ms, thread da GUI): lê `engine.state` de cada canal e atualiza tempo, progresso, cursor da onda e a cor verde do botão que está tocando. Enquanto o usuário arrasta o progresso, a atualização daquele slider pausa por 0,4 s para não brigar com o mouse.
 
 ### 3.7 `widgets.py`
@@ -140,6 +146,22 @@ Classe `LoopbackRecorder`.
 - **Novo texto na interface:** nunca escrever o texto direto no código; criar a chave em todos os idiomas.
 - **Cuidado:** dentro de uma função que chama `t()`, não usar `t` como variável local (ex.: tempo), porque isso esconde a função.
 
+### 3.9 `voice.py`
+Cada efeito é um objeto chamável `efeito(bloco) -> bloco` (mono float32, qualquer tamanho) que guarda estado entre blocos. Roda dentro do callback de áudio, então usa só numpy vetorizado: nada de loop por amostra. Custo medido: < 0,3 ms por bloco de 10 ms.
+
+| Efeito | Como funciona |
+|---|---|
+| `deep` / `high` | `PitchShifter` (0,75 / 1,45): linha de atraso lida por dois cursores em contrafase com janelas sin² que somam 1. Latência média de meia janela (~21 ms). |
+| `ogre` | pitch 0,62 + saturação (`tanh`) + passa-baixa FIR de 2,2 kHz |
+| `robot` | STFT (1024/256) com a fase zerada: voz monótona em SR/HOP ≈ 188 Hz mantendo as palavras |
+| `autotune` | `detect_pitch` (autocorrelação via FFT em 2048 amostras) e `PitchShifter` puxando para o semitom mais próximo, com histerese de 0,6 semitom para não alternar entre duas notas |
+| `echo` | atraso de 280 ms com realimentação 0,45 (vetorizável porque o atraso é maior que o bloco) |
+| `radio` | passa-banda FIR 400–3000 Hz + saturação |
+| `alien` | pitch 1,3 com vibrato de 5 Hz |
+
+- **Novo efeito:** criar a classe (ou `Chain(...)` de passos existentes), registrar em `make()` e em `EFFECTS`, e adicionar `fx_<nome>` em todos os idiomas do `i18n`.
+- A razão do `PitchShifter` pode mudar a cada bloco (`efeito(x, razao)`); ela é interpolada dentro do bloco para não estalar.
+
 ## 4. Fluxos principais
 
 **Carregar slots:** ao iniciar/aplicar (e ao escolher arquivo), uma thread chama `engine.set_sound(row, path)`.
@@ -149,6 +171,12 @@ Classe `LoopbackRecorder`.
 **Pausar / parar / buscar:** ⏸ → `engine.pause(row)`, ■ → `engine.stop(row)`, arrastar o progresso → `engine.seek(row, s)`.
 
 **Salvar clipe (F5):** hotkey → thread → `recorder.save(clips/last_clip.mp3)` → `_load_clip(reset_trim=True)` decodifica e cria o canal `"clip"` → na GUI, `_show_clip` desenha a onda e aplica o trecho inteiro. Ao abrir o app, um clipe existente é carregado com o `clip_trim` salvo.
+
+**Adicionar sons (+ Adicionar som):** `askopenfilenames` → para cada arquivo, `_add_sound` usa o primeiro slot sem arquivo (mantendo a tecla dele) ou cria um slot novo, e carrega numa thread.
+
+**Salvar clipe como som:** `_save_as_sound` pede o nome (`CTkInputDialog`; cancelar não faz nada), remove caracteres inválidos e, numa thread, grava o trecho `[start, end)` da onda em `sounds/<nome>.mp3` (com sufixo `(2)`, `(3)`... se já existir). Depois `_sound_saved` adiciona o som com caminho relativo.
+
+**Efeito de voz:** clique no botão → `_on_voice` → `engine.set_voice(nome)` e salva `voice_effect`.
 
 **Cortar o clipe:** soltar uma alça → `_clip_range` → `engine.set_range("clip", ini, fim)` e salva `clip_trim`.
 
@@ -183,23 +211,21 @@ Classe `LoopbackRecorder`.
 
 ## 7. Estado atual e pendências
 
-Verificado: codec (mp3 ida e volta), mixer offline (volume, parada), abertura da GUI.
+Verificado com VB-CABLE: sons e microfone chegando ao CABLE Output, F5 gerando o mp3, monitor nos fones, hotkeys globais com o app em segundo plano, troca de idioma ao vivo, efeitos de voz (frequência de saída, custo por bloco, silêncio, blocos irregulares) com sinal sintético.
 
-**Ainda não verificado** (bloqueado pelo serviço de áudio parado e pela falta do VB-CABLE):
-1. Streams reais: mic + sons → CABLE Input, ouvidos pelo CABLE Output.
-2. Loopback por polling (versão nova do `recorder.py`) e geração do mp3 do F5.
-3. Monitor nos fones sem eco do microfone.
-4. Hotkeys globais com o app em segundo plano.
+**Ainda não verificado:**
+1. Efeitos de voz com voz humana real, de ouvido (só foram testados com sinal sintético).
+2. Detecção automática do idioma num Windows em inglês.
 
 ## 8. Roadmap sugerido
 
-1. **Validação de ponta a ponta** (itens da seção 7) com VB-CABLE instalado.
-2. **Testes automatizados** (`tests/`): codec, mixer (`_out_cb` com buffers sintéticos), `config`, buffer circular do recorder com fonte falsa.
-3. **Robustez de dispositivos:** reabrir streams se um dispositivo sumir/trocar; recarregar lista de dispositivos.
-4. **Qualidade:** medidor de nível do mic/saída, botão "tocar clipe" na GUI, escolha do nome/pasta do clipe, vários clipes (histórico com timestamp).
+1. **Testes automatizados** (`tests/`): codec, mixer (`_out_cb` com buffers sintéticos), efeitos de voz (os testes de frequência feitos à mão), `config`, buffer circular do recorder com fonte falsa.
+2. **Robustez de dispositivos:** reabrir streams se um dispositivo sumir/trocar; recarregar lista de dispositivos.
+3. **Voz:** hotkeys para trocar de efeito, intensidade ajustável (ex.: quantos semitons no grave/agudo), escala musical no autotune.
+4. **Qualidade:** medidor de nível do mic/saída, renomear sons salvos.
 5. **UX:** bandeja do sistema (minimizar para a bandeja), iniciar com o Windows, perfis de slots, arrastar-e-soltar de arquivos.
-6. **Áudio:** fade-out ao parar, modo "segurar para tocar", limitador no lugar do clip duro, reamostragem própria se o `auto_convert` causar artefatos.
-7. **Distribuição:** empacotar com PyInstaller em `.exe` (incluir o binário do ffmpeg do `imageio-ffmpeg`).
+6. **Áudio:** fade-out ao parar, modo "segurar para tocar", limitador no lugar do clip duro.
+7. **Distribuição:** assinar o `.exe` para evitar o aviso do SmartScreen.
 
 ## 9. Como rodar e depurar
 

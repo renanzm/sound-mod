@@ -5,6 +5,7 @@ from collections import deque
 import numpy as np
 import sounddevice as sd
 
+from . import voice
 from .codec import SR, decode
 from .i18n import t
 
@@ -56,8 +57,14 @@ class Engine:
         self.mix_mic = True
         self.monitor = True
         self.master = 1.0
+        self.hear_self = False  # manda a propria voz (com efeito) para os fones
+        self.voice = None  # efeito de voz atual (voice.make) ou None
         self.has_monitor = False
         self.streams = []
+
+    def set_voice(self, name):
+        # troca o objeto inteiro: o callback le a referencia uma vez por bloco, sem lock
+        self.voice = voice.make(name)
 
     # ---- sons ----
     def load(self, path):
@@ -238,24 +245,35 @@ class Engine:
                     ch.pos = ch.start
         return mix * self.master
 
+    def _pull_mic(self, frames):
+        mic = np.zeros(frames, dtype=np.float32)
+        got = 0
+        while got < frames and self.mic_buf:
+            chunk = self.mic_buf.popleft()
+            n = min(len(chunk), frames - got)
+            mic[got:got + n] = chunk[:n]
+            got += n
+            if n < len(chunk):
+                self.mic_buf.appendleft(chunk[n:])
+        self.mic_frames = max(0, self.mic_frames - got)
+        fx = self.voice
+        if fx is not None:
+            try:
+                mic = fx(mic)
+            except Exception:
+                self.voice = None  # um efeito com defeito nao pode derrubar o stream
+        return mic
+
     def _out_cb(self, outdata, frames, t, status):
         mix = self._render_sounds(frames)
+        mic = self._pull_mic(frames) if self.mix_mic or self.hear_self else None
         if self.monitor and self.has_monitor:
-            self.mon_buf.append(mix.copy())
+            mon = mix + mic[:, None] if self.hear_self else mix.copy()
+            self.mon_buf.append(np.clip(mon, -1.0, 1.0))
             self.mon_frames += frames
             while self.mon_frames > MAX_LAG and self.mon_buf:
                 self.mon_frames -= len(self.mon_buf.popleft())
         if self.mix_mic:
-            mic = np.zeros(frames, dtype=np.float32)
-            got = 0
-            while got < frames and self.mic_buf:
-                chunk = self.mic_buf.popleft()
-                n = min(len(chunk), frames - got)
-                mic[got:got + n] = chunk[:n]
-                got += n
-                if n < len(chunk):
-                    self.mic_buf.appendleft(chunk[n:])
-            self.mic_frames = max(0, self.mic_frames - got)
             mix += mic[:, None]
         np.clip(mix, -1.0, 1.0, out=outdata)
 

@@ -18,7 +18,7 @@ if (-not (Test-Path .venv)) { python -m venv .venv }
 $keep = Join-Path $env:TEMP "soundmod-keep"
 if (-not (Test-Path $keep) -and (Test-Path dist\SoundMod)) {
     New-Item -ItemType Directory $keep | Out-Null
-    foreach ($f in "config.json", "clips") {
+    foreach ($f in "config.json", "clips", "sounds") {
         if (Test-Path "dist\SoundMod\$f") { Copy-Item "dist\SoundMod\$f" $keep -Recurse }
     }
 }

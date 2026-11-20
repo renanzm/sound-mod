@@ -1,12 +1,14 @@
+import re
 import threading
 import time
 from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
+import numpy as np
 
-from . import config, i18n
-from .codec import SR
+from . import config, i18n, voice
+from .codec import SR, encode_mp3
 from .engine import Engine, wasapi_devices
 from .hotkeys import HotkeyManager, capture_key
 from .i18n import t
@@ -105,6 +107,7 @@ class App(ctk.CTk):
         self.clip_active = False
         self.capturing_key = False
 
+        self.engine.set_voice(self.cfg["voice_effect"])
         self.ins, self.outs = wasapi_devices()
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -164,6 +167,18 @@ class App(ctk.CTk):
         ctk.CTkOptionMenu(opts, variable=self.lang_var, values=list(i18n.LANGUAGES.values()), width=110,
                           command=self._on_language).pack(side="right", padx=8)
 
+        fx = ctk.CTkFrame(dev, fg_color="transparent")
+        fx.grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
+        ctk.CTkLabel(fx, text=t("voice")).pack(side="left", padx=(8, 6))
+        self.fx_names = {t(f"fx_{name}"): name for name in voice.EFFECTS}
+        current = self.cfg["voice_effect"] if self.cfg["voice_effect"] in voice.EFFECTS else "normal"
+        self.fx_var = ctk.StringVar(value=t(f"fx_{current}"))
+        ctk.CTkSegmentedButton(fx, values=list(self.fx_names), variable=self.fx_var,
+                               command=self._on_voice).pack(side="left", padx=4)
+        self.hear_self_var = ctk.BooleanVar(value=self.cfg["hear_self"])
+        ctk.CTkCheckBox(fx, text=t("hear_self"), variable=self.hear_self_var,
+                        command=self._apply_live).pack(side="left", padx=12)
+
         if not self.cable_found:
             ctk.CTkLabel(
                 self, text_color="#e6a23c", wraplength=780, justify="left", text=t("no_cable"),
@@ -189,7 +204,7 @@ class App(ctk.CTk):
         # clipe do audio do PC
         clip = ctk.CTkFrame(self)
         clip.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
-        clip.grid_columnconfigure(8, weight=1)
+        clip.grid_columnconfigure(9, weight=1)
         ctk.CTkLabel(clip, text=t("save_last")).grid(row=0, column=0, padx=(10, 4), pady=8)
         self.secs = ctk.CTkEntry(clip, width=40)
         self.secs.insert(0, str(self.cfg["clip_seconds"]))
@@ -202,13 +217,15 @@ class App(ctk.CTk):
         self.clip_key.grid(row=0, column=5, padx=(0, 4))
         ctk.CTkButton(clip, text="⏸", width=30, command=lambda: self.engine.pause(CLIP)).grid(row=0, column=6, padx=2)
         ctk.CTkButton(clip, text="■", width=30, command=lambda: self.engine.stop(CLIP)).grid(row=0, column=7, padx=2)
-        ctk.CTkLabel(clip, text=t("stop_all")).grid(row=0, column=9, padx=(0, 4))
+        ctk.CTkButton(clip, text=t("save_as_sound"), width=130, command=self._save_as_sound
+                      ).grid(row=0, column=8, padx=(10, 2))
+        ctk.CTkLabel(clip, text=t("stop_all")).grid(row=0, column=10, padx=(0, 4))
         self.stop_key = self._cfg_key_button(clip, "■", "stop_key", self.engine.stop_all)
-        self.stop_key.grid(row=0, column=10, padx=(0, 10))
+        self.stop_key.grid(row=0, column=11, padx=(0, 10))
         self.wave = Waveform(clip, self._clip_range, self._clip_seek)
-        self.wave.grid(row=1, column=0, columnspan=11, sticky="ew", padx=10, pady=(0, 4))
+        self.wave.grid(row=1, column=0, columnspan=12, sticky="ew", padx=10, pady=(0, 4))
         ctk.CTkLabel(clip, text_color="gray60", text=t("clip_hint")).grid(
-            row=2, column=0, columnspan=11, sticky="w", padx=10, pady=(0, 6))
+            row=2, column=0, columnspan=12, sticky="w", padx=10, pady=(0, 6))
 
         self.status = ctk.CTkLabel(self, text=t("ready"), anchor="w")
         self.status.grid(row=4, column=0, sticky="ew", padx=14, pady=(2, 10))
@@ -253,9 +270,26 @@ class App(ctk.CTk):
         self.after(100, self._tick)
 
     def _add_slot(self):
-        slot = {"key": "", "path": "", "volume": 1.0}
-        self.cfg["slots"].append(slot)
-        self._add_row(slot)
+        paths = filedialog.askopenfilenames(filetypes=[(t("audio_files"), AUDIO_GLOB), (t("all_files"), "*.*")])
+        for path in paths:
+            self._add_sound(path)
+        if paths:
+            self._register_hotkeys()
+            config.save(self.cfg)
+            self._say(t("sounds_added", n=len(paths)))
+
+    def _add_sound(self, path):
+        """Usa o primeiro slot sem arquivo (mantem a tecla dele) ou cria um slot novo."""
+        row = next((r for r in self.rows if not r.slot["path"]), None)
+        if row is None:
+            slot = {"key": "", "path": "", "volume": 1.0}
+            self.cfg["slots"].append(slot)
+            row = self._add_row(slot)
+        row.slot["path"] = path
+        row.name.configure(text=short(Path(path).name))
+        self.engine.invalidate(config.resolve(path))
+        threading.Thread(target=self._load_slot, args=(row, True), daemon=True).start()
+        return row
 
     def _remove_slot(self, row):
         self.cfg["slots"].remove(row.slot)
@@ -272,13 +306,13 @@ class App(ctk.CTk):
             return
         row.slot["path"] = path
         row.name.configure(text=short(Path(path).name))
-        self.engine.invalidate(path)
+        self.engine.invalidate(config.resolve(path))
         threading.Thread(target=self._load_slot, args=(row,), daemon=True).start()
 
     def _load_slot(self, row, quiet=False):
         path = row.slot["path"]
         try:
-            self.engine.set_sound(row, path, row.slot["volume"])
+            self.engine.set_sound(row, config.resolve(path), row.slot["volume"])
             if not quiet:
                 self._say(t("loaded", name=Path(path).name))
             return True
@@ -401,6 +435,42 @@ class App(ctk.CTk):
         self.engine.seek(CLIP, t)
         self.wave.set_pos(t)
 
+    def _save_as_sound(self):
+        """Grava o trecho escolhido do clipe em sounds/<nome>.mp3 e adiciona como um som."""
+        if not self.engine.has(CLIP):
+            return self._say(t("no_clip_saved"))
+        default = time.strftime("clip-%Y%m%d-%H%M%S")
+        dialog = ctk.CTkInputDialog(text=t("sound_name"), title=t("save_sound_title"))
+        name = dialog.get_input()
+        if name is None:
+            return  # cancelado
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", name).strip(" .") or default
+        start, end = self.wave.start, self.wave.end
+        data = self.engine.load(config.CLIP_PATH)
+
+        def work():
+            try:
+                config.SOUNDS_DIR.mkdir(exist_ok=True)
+                target = config.SOUNDS_DIR / f"{name}.mp3"
+                n = 2
+                while target.exists():
+                    target = config.SOUNDS_DIR / f"{name} ({n}).mp3"
+                    n += 1
+                part = data[int(start * SR):int(end * SR)]
+                encode_mp3((np.clip(part, -1, 1) * 32767).astype(np.int16), SR, 2, target)
+            except Exception as e:
+                return self._say(t("sound_save_error", e=e))
+            # relativo a pasta do programa: continua valendo se a pasta for copiada/atualizada
+            rel = target.relative_to(config.ROOT).as_posix()
+            self.after(0, lambda: self._sound_saved(rel))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _sound_saved(self, rel):
+        self._add_sound(rel)
+        self._register_hotkeys()
+        config.save(self.cfg)
+        self._say(t("sound_saved", name=Path(rel).name))
+
     def _toggle_clip(self):
         if not self.engine.has(CLIP):
             return self._say(t("no_clip_saved"))
@@ -409,7 +479,15 @@ class App(ctk.CTk):
         self._say(t("clip_playing" if self.engine.toggle(CLIP) else "clip_stopped"))
 
     # ---------- engine ----------
+    def _on_voice(self, label):
+        name = self.fx_names[label]
+        self.cfg["voice_effect"] = name
+        self.engine.set_voice(name)
+        config.save(self.cfg)
+        self._say(t("voice_on", name=label))
+
     def _apply_live(self):
+        self.engine.hear_self = self.hear_self_var.get()
         self.engine.mix_mic = self.mix_var.get()
         self.engine.monitor = self.monitor_var.get()
         self.engine.master = float(self.vol_slider.get())
@@ -426,6 +504,7 @@ class App(ctk.CTk):
         loop = self.loop_var.get()
         self.cfg["loopback_device"] = None if loop.startswith("(") else loop
         self.cfg["mix_mic"] = self.mix_var.get()
+        self.cfg["hear_self"] = self.hear_self_var.get()
         self.cfg["monitor"] = self.monitor_var.get()
         self.cfg["master_volume"] = float(self.vol_slider.get())
         try:

@@ -13,7 +13,9 @@ It can also record the **last few seconds of your PC audio** (5 s by default) so
 - **Any format**: mp3, wav, ogg, flac, m4a, aac... (ffmpeg is bundled, nothing else to install).
 - **Per-sound controls**: ▶ play, ⏸ pause/resume, ■ stop, draggable progress bar (seek forward/back) and individual live volume.
 - **One sound at a time**: playing a sound interrupts the current one.
-- **PC audio clip**: one key saves the last N seconds to `clips/last_clip.mp3`, another plays it. The waveform lets you **choose the part** that plays.
+- **Add many files at once**: **+ Add sound** accepts several files; they fill the empty slots first.
+- **Voice effects**: Deep, High, Robot, Ogre, Autotune, Echo, Radio and Alien, applied live to your mic. Turn on **Hear my voice** to hear how you sound.
+- **PC audio clip**: one key saves the last N seconds to `clips/last_clip.mp3`, another plays it. The waveform lets you **choose the part** that plays, and **Save as sound** keeps that part as a new sound in the list (stored in `sounds/`).
 - **Headphone monitor**: you hear the sounds while they go out on your mic.
 - **English and Portuguese**: follows your Windows language, and you can switch at any time in the app.
 - Lightweight dark interface (customtkinter).
@@ -47,17 +49,18 @@ python -m venv .venv
 1. **Real microphone**: your physical mic. **Output -> virtual cable**: `CABLE Input`. **Hear sounds on**: your headphones (don't choose the cable here).
 2. In Discord or your game, choose **CABLE Output** as the microphone. In Discord, turn off Noise Suppression, Echo Cancellation and Automatic Gain Control, which tend to cut sound effects.
 3. Assign files to the slots. Each key button is split: **▶ F1** plays and, pressed again, stops; **✎** changes the key; **⌫** removes the key.
-   Only one sound plays at a time: playing another interrupts the current one.
-4. **F5** saves the last N seconds of PC audio and shows the waveform; drag the orange handles to choose the part. **F6** plays that part. **F12** stops everything.
+   Only one sound plays at a time: playing another interrupts the current one. **+ Add sound** lets you pick several files at once.
+4. **F5** saves the last N seconds of PC audio and shows the waveform; drag the orange handles to choose the part. **F6** plays that part. **F12** stops everything. **Save as sound** asks for a name and adds the selected part to your sounds.
+5. **Voice effect**: pick an effect in the bar under the devices. It changes your mic live; **Normal** turns it off. Check **Hear my voice** to monitor yourself in your headphones.
 
-To change the language, use the menu next to **Apply / Restart**. Settings are stored in `config.json` next to the program.
+To change the language, use the menu next to **Apply / Restart**. Settings are stored in `config.json` next to the program, and saved clips in the `sounds` folder. When upgrading, copy `config.json`, `clips` and `sounds` to the new folder.
 
 ## Building the executable
 
 ```
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
-Creates `dist\SoundMod\SoundMod.exe` (use `-OneFile` for a single `.exe`). Close the app before building. `config.json` and the `clips\` folder are kept when you rebuild.
+Creates `dist\SoundMod\SoundMod.exe` (use `-OneFile` for a single `.exe`). Close the app before building. `config.json` and the `clips\` and `sounds\` folders are kept when you rebuild.
 
 ## Documentation
 
