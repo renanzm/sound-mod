@@ -1,3 +1,4 @@
+import os
 import queue
 import re
 import threading
@@ -8,7 +9,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 import numpy as np
 
-from . import config, i18n, voice
+from . import config, i18n, library, voice
 from .codec import SR, encode_mp3
 from .engine import Engine, wasapi_devices
 from .hotkeys import HotkeyManager, capture_key
@@ -19,6 +20,11 @@ from .widgets import KeyButton, ScrollFrame, Waveform
 AUDIO_GLOB = "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.wma"
 LEGACY_NONE = "(nenhum)"  # config.json antigos guardavam o texto em vez de ""
 CLIP = "clip"  # id do canal do clipe no engine
+NAME_COL = 3   # coluna do nome do som na lista (a que estica)
+COLUMNS = 12   # colunas de uma linha de som (os cabecalhos de colecao ocupam todas)
+GRAY = dict(fg_color=("gray70", "gray30"), hover_color=("gray60", "gray40"))
+# rotulos do menu que nao podem virar nome de colecao (em qualquer idioma)
+RESERVED = [i18n.TEXTS[lang]["no_collection"] for lang in i18n.TEXTS]
 
 
 def mmss(t):
@@ -39,12 +45,19 @@ class SlotRow:
         self.active = False
         p = app.list
         set_key = lambda k: slot.__setitem__("key", k)
+        self.move = ctk.CTkFrame(p, fg_color="transparent")
+        self.up = ctk.CTkButton(self.move, text="▲", width=24, command=lambda: app._move_slot(self, -1), **GRAY)
+        self.up.grid(row=0, column=0)
+        self.down = ctk.CTkButton(self.move, text="▼", width=24, command=lambda: app._move_slot(self, 1), **GRAY)
+        self.down.grid(row=0, column=1, padx=(2, 0))
         self.key = KeyButton(p, "▶", slot["key"], lambda: app._toggle_slot(self),
                              lambda kb: app._rebind(kb, set_key), lambda kb: app._clear_key(kb, set_key))
         self.file_btn = ctk.CTkButton(p, text=t("file"), width=78, command=lambda: app._pick(self))
         self.name = ctk.CTkLabel(p, text=short(Path(slot["path"]).name) or t("no_file"), anchor="w")
+        self.coll = ctk.CTkOptionMenu(p, width=130, dynamic_resizing=False, values=[t("no_collection")],
+                                      command=lambda label: app._set_collection(self, label))
         self.time = ctk.CTkLabel(p, text="-:-- / -:--", width=84, text_color="gray70")
-        self.progress = ctk.CTkSlider(p, from_=0, to=1, width=170, command=self._seek)
+        self.progress = ctk.CTkSlider(p, from_=0, to=1, width=150, command=self._seek)
         self.progress.set(0)
         self.vol = ctk.CTkSlider(p, from_=0, to=1.5, width=90, command=self._volume)
         self.vol.set(slot["volume"])
@@ -53,13 +66,25 @@ class SlotRow:
         self.stop_btn = ctk.CTkButton(p, text="■", width=30, command=lambda: app.engine.stop(self))
         self.rm_btn = ctk.CTkButton(p, text="✕", width=30, fg_color="#7a2b2b", hover_color="#a33",
                                     command=lambda: app._remove_slot(self))
-        self.widgets = [self.key, self.file_btn, self.name, self.time, self.progress, self.vol,
-                        self.play_btn, self.pause_btn, self.stop_btn, self.rm_btn]
+        self.widgets = [self.move, self.key, self.file_btn, self.name, self.coll, self.time, self.progress,
+                        self.vol, self.play_btn, self.pause_btn, self.stop_btn, self.rm_btn]
 
     def grid(self, r):
         for c, w in enumerate(self.widgets):
-            w.grid(row=r, column=c, padx=(4, 2) if c else (4, 6), pady=3,
+            w.grid(row=r, column=c, padx=(4, 2) if c else (4, 4), pady=3,
                    sticky="ew" if w is self.name else "")
+
+    def hide(self):
+        """Some da lista (colecao recolhida); a tecla continua funcionando."""
+        for w in self.widgets:
+            w.grid_remove()
+
+    def update_place(self, labels, current, can_up, can_down):
+        """Menu de colecoes, colecao atual e quais setas de ordem valem."""
+        self.coll.configure(values=labels)
+        self.coll.set(current)
+        self.up.configure(state="normal" if can_up else "disabled")
+        self.down.configure(state="normal" if can_down else "disabled")
 
     def destroy(self):
         for w in self.widgets:
@@ -91,20 +116,55 @@ class SlotRow:
             self.key.set_active(playing)
 
 
+class CollectionHeader(ctk.CTkFrame):
+    """Cabecalho de um grupo da lista: nome e quantidade; nas colecoes, recolher, adicionar som,
+    mudar de posicao, renomear e apagar. coll None = grupo dos sons sem colecao."""
+
+    def __init__(self, app, coll, count, first=True, last=True):
+        super().__init__(app.list, fg_color=("gray80", "gray22"), corner_radius=6)
+        bold = ctk.CTkFont(size=13, weight="bold")
+        if coll is None:
+            ctk.CTkLabel(self, text=f"{t('ungrouped')}  ({count})", font=bold, text_color="gray70"
+                         ).pack(side="left", padx=12, pady=3)
+            return
+        name = coll["name"]
+        # adiado: o botao clicado e destruido quando a lista e redesenhada
+        later = lambda fn: (lambda: app.after(10, fn))
+        ctk.CTkButton(self, text="▸" if coll["collapsed"] else "▾", width=26, **GRAY, font=ctk.CTkFont(size=18),
+                      command=later(lambda: app._toggle_collection(name))).pack(side="left", padx=(6, 4), pady=3)
+        ctk.CTkLabel(self, text=f"{name}  ({count})", font=bold).pack(side="left", padx=4)
+        ctk.CTkButton(self, text="✕", width=28, fg_color="#7a2b2b", hover_color="#a33",
+                      command=later(lambda: app._delete_collection(name))).pack(side="right", padx=(2, 6))
+        ctk.CTkButton(self, text="✎", width=28, **GRAY,
+                      command=later(lambda: app._rename_collection(name))).pack(side="right", padx=2)
+        ctk.CTkButton(self, text="▼", width=24, **GRAY, state="disabled" if last else "normal",
+                      command=later(lambda: app._move_collection(name, 1))).pack(side="right", padx=2)
+        ctk.CTkButton(self, text="▲", width=24, **GRAY, state="disabled" if first else "normal",
+                      command=later(lambda: app._move_collection(name, -1))).pack(side="right", padx=2)
+        ctk.CTkButton(self, text=t("add_here"), width=70,
+                      command=later(lambda: app._add_slot(name))).pack(side="right", padx=(2, 10))
+
+    def place_at(self, r):
+        self.grid(row=r, column=0, columnspan=COLUMNS, sticky="ew", padx=4, pady=(10, 2))
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         ctk.set_appearance_mode("dark")
         self.title("Sound Mod")
-        self.geometry("1040x780")
-        self.minsize(940, 620)
+        self.geometry("1180x780")
+        self.minsize(1080, 620)
 
         self.cfg = config.load()
         i18n.set_language(self.cfg["language"])
+        # aviso unico na barra de status quando a config da versao antiga foi importada
+        self.notice = t("config_imported", path=config.migrated_from) if config.migrated_from else None
         self.engine = Engine()
         self.recorder = LoopbackRecorder(self.cfg["clip_seconds"])
         self.hotkeys = HotkeyManager()
         self.rows = []
+        self.headers = []
         self.clip_active = False
         self.capturing_key = False
         # threads nunca mexem no Tk: enfileiram aqui e o _tick executa na thread da janela.
@@ -167,6 +227,8 @@ class App(ctk.CTk):
         self.vol_slider.pack(side="left")
         ctk.CTkButton(opts, text=t("apply"), width=140, command=self._start_all
                       ).pack(side="right", padx=8)
+        ctk.CTkButton(opts, text=t("data_folder"), width=110, command=self._open_data_folder, **GRAY
+                      ).pack(side="right", padx=(8, 0))
         self.lang_var = ctk.StringVar(value=i18n.LANGUAGES[i18n.current()])
         ctk.CTkOptionMenu(opts, variable=self.lang_var, values=list(i18n.LANGUAGES.values()), width=110,
                           command=self._on_language).pack(side="right", padx=8)
@@ -198,12 +260,16 @@ class App(ctk.CTk):
         ctk.CTkLabel(head, text=t("sounds"), font=ctk.CTkFont(size=15, weight="bold")).pack(side="left", padx=6)
         ctk.CTkLabel(head, text=t("sounds_hint"), text_color="gray60").pack(side="left", padx=10)
         ctk.CTkButton(head, text=t("add_sound"), width=130, command=self._add_slot).pack(side="right")
+        ctk.CTkButton(head, text=t("new_collection"), width=130, command=self._new_collection, **GRAY
+                      ).pack(side="right", padx=(0, 8))
         scroll = ScrollFrame(box)
         scroll.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
         self.list = scroll.inner
-        self.list.grid_columnconfigure(2, weight=1)
+        self.list.grid_columnconfigure(NAME_COL, weight=1)
+        self.headers = []
         for s in self.cfg["slots"]:
             self._add_row(s)
+        self._layout()
 
         # clipe do audio do PC
         clip = ctk.CTkFrame(self)
@@ -240,10 +306,47 @@ class App(ctk.CTk):
                          lambda kb: self._rebind(kb, set_key), lambda kb: self._clear_key(kb, set_key))
 
     def _add_row(self, slot):
+        """Cria a linha do som no fim de self.rows; quem chama redesenha com _layout()."""
         row = SlotRow(self, slot)
-        row.grid(len(self.rows))
         self.rows.append(row)
         return row
+
+    def _layout(self):
+        """Redesenha a lista agrupada por colecao, na ordem de cfg["slots"].
+
+        As linhas (SlotRow) sobrevivem, porque sao os ids dos canais no engine; so os
+        cabecalhos sao recriados. Sem nenhuma colecao, a lista fica como era, sem cabecalhos.
+        """
+        for h in self.headers:
+            h.destroy()
+        self.headers = []
+        order = {id(s): i for i, s in enumerate(self.cfg["slots"])}
+        self.rows.sort(key=lambda r: order[id(r.slot)])  # mesma ordem que cfg["slots"]
+        by_slot = {id(r.slot): r for r in self.rows}
+        cols = self.cfg["collections"]
+        labels = [t("no_collection")] + library.names(self.cfg)
+        r = 0
+        for coll, slots in library.groups(self.cfg):
+            if cols and (coll is not None or slots):
+                i = library.index(cols, coll) if coll is not None else 0
+                h = CollectionHeader(self, coll, len(slots), first=i == 0, last=i == len(cols) - 1)
+                h.place_at(r)
+                self.headers.append(h)
+                r += 1
+            hidden = coll is not None and coll["collapsed"]
+            for i, s in enumerate(slots):
+                row = by_slot[id(s)]
+                row.update_place(labels, s["collection"] or t("no_collection"), i > 0, i < len(slots) - 1)
+                if hidden:
+                    row.hide()
+                else:
+                    row.grid(r)
+                    r += 1
+
+    def _changed(self):
+        """Depois de mudar ordem/colecoes: redesenha e salva."""
+        self._layout()
+        config.save(self.cfg)
 
     # ---------- acoes ----------
     @staticmethod
@@ -286,20 +389,25 @@ class App(ctk.CTk):
             self.clip_active = playing
             self.clip_key.set_active(playing)
 
-    def _add_slot(self):
+    def _add_slot(self, collection=None):
+        """+ Adicionar som (collection None) ou o + da colecao: escolhe arquivos e adiciona."""
         paths = filedialog.askopenfilenames(filetypes=[(t("audio_files"), AUDIO_GLOB), (t("all_files"), "*.*")])
         for path in paths:
-            self._add_sound(path)
+            self._add_sound(path, collection)
         if paths:
+            if collection and library.find(self.cfg, collection):
+                library.set_collapsed(self.cfg, collection, False)
+            self._layout()
             self._register_hotkeys()
             config.save(self.cfg)
             self._say(t("sounds_added", n=len(paths)))
 
-    def _add_sound(self, path):
-        """Usa o primeiro slot sem arquivo (mantem a tecla dele) ou cria um slot novo."""
-        row = next((r for r in self.rows if not r.slot["path"]), None)
+    def _add_sound(self, path, collection=None):
+        """Usa o primeiro slot sem arquivo do mesmo grupo (mantem a tecla dele) ou cria um slot
+        novo no fim do grupo. Quem chama redesenha com _layout()."""
+        row = next((r for r in self.rows if not r.slot["path"] and r.slot["collection"] == collection), None)
         if row is None:
-            slot = {"key": "", "path": "", "volume": 1.0}
+            slot = {"key": "", "path": "", "volume": 1.0, "collection": collection}
             self.cfg["slots"].append(slot)
             row = self._add_row(slot)
         row.slot["path"] = path
@@ -309,13 +417,72 @@ class App(ctk.CTk):
         return row
 
     def _remove_slot(self, row):
-        self.cfg["slots"].remove(row.slot)
+        slots = self.cfg["slots"]
+        slots.pop(library.index(slots, row.slot))  # por identidade: slots vazios sao iguais (==)
         self.engine.remove(row)
         row.destroy()
         self.rows.remove(row)
-        for r, other in enumerate(self.rows):
-            other.grid(r)
+        self._layout()
         self._register_hotkeys()
+        config.save(self.cfg)
+
+    # ---------- ordem e colecoes ----------
+    def _move_slot(self, row, delta):
+        if library.move(self.cfg, row.slot, delta):
+            self._changed()
+
+    def _set_collection(self, row, label):
+        name = None if label == t("no_collection") else label
+        if not library.set_collection(self.cfg, row.slot, name):
+            return
+        if name:
+            library.set_collapsed(self.cfg, name, False)  # para o som nao sumir da vista
+        self._changed()
+        self._say(t("moved_to", sound=Path(row.slot["path"]).name or t("no_file"),
+                    name=name or t("ungrouped")))
+
+    def _ask_collection_name(self, title, current=None):
+        """Pede o nome; None se cancelou ou se o nome nao serve (a barra de status diz o motivo)."""
+        name = ctk.CTkInputDialog(text=t("collection_name"), title=title).get_input()
+        if name is None:
+            return None
+        name, error = library.clean_name(self.cfg, name, current, RESERVED)
+        if error:
+            self._say(t(f"collection_{error}", name=name))
+            return None
+        return name
+
+    def _new_collection(self):
+        name = self._ask_collection_name(t("new_collection_title"))
+        if name:
+            library.add_collection(self.cfg, name)
+            self._changed()
+            self._say(t("collection_created", name=name))
+
+    def _rename_collection(self, old):
+        new = self._ask_collection_name(t("rename_collection_title", name=old), current=old)
+        if new and new != old:
+            library.rename_collection(self.cfg, old, new)
+            self._changed()
+            self._say(t("collection_renamed", old=old, name=new))
+
+    def _delete_collection(self, name):
+        library.delete_collection(self.cfg, name)
+        self._changed()
+        self._say(t("collection_deleted", name=name))
+
+    def _move_collection(self, name, delta):
+        if library.move_collection(self.cfg, name, delta):
+            self._changed()
+
+    def _toggle_collection(self, name):
+        coll = library.find(self.cfg, name)
+        library.set_collapsed(self.cfg, name, not coll["collapsed"])
+        self._changed()
+
+    def _open_data_folder(self):
+        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        os.startfile(config.DATA_DIR)
 
     def _pick(self, row):
         path = filedialog.askopenfilename(filetypes=[(t("audio_files"), AUDIO_GLOB), (t("all_files"), "*.*")])
@@ -467,7 +634,7 @@ class App(ctk.CTk):
 
         def work():
             try:
-                config.SOUNDS_DIR.mkdir(exist_ok=True)
+                config.SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
                 target = config.SOUNDS_DIR / f"{name}.mp3"
                 n = 2
                 while target.exists():
@@ -477,13 +644,14 @@ class App(ctk.CTk):
                 encode_mp3((np.clip(part, -1, 1) * 32767).astype(np.int16), SR, 2, target)
             except Exception as e:
                 return self._say(t("sound_save_error", e=e))
-            # relativo a pasta do programa: continua valendo se a pasta for copiada/atualizada
-            rel = target.relative_to(config.ROOT).as_posix()
+            # relativo a pasta de dados: continua valendo se ela for copiada para outro PC
+            rel = target.relative_to(config.DATA_DIR).as_posix()
             self._post(lambda: self._sound_saved(rel))
         threading.Thread(target=work, daemon=True).start()
 
     def _sound_saved(self, rel):
         self._add_sound(rel)
+        self._layout()
         self._register_hotkeys()
         config.save(self.cfg)
         self._say(t("sound_saved", name=Path(rel).name))
@@ -562,6 +730,9 @@ class App(ctk.CTk):
         except Exception as e:
             msgs.append(t("capture_error", e=e))
 
+        if self.notice:
+            msgs.insert(0, self.notice)
+            self.notice = None
         self._register_hotkeys()
         config.save(self.cfg)
         self._load_missing()
