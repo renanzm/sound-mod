@@ -13,14 +13,14 @@ if (Get-Process SoundMod -ErrorAction SilentlyContinue) {
 if (-not (Test-Path .venv)) { python -m venv .venv }
 .\.venv\Scripts\python.exe -m pip install -q -r requirements-dev.txt
 
-# o PyInstaller apaga dist\SoundMod: preserva config e clipes do usuario.
+# o PyInstaller apaga dist\SoundMod inteira: preserva tudo que nao foi ele que gerou
+# (config.json, clips, sounds e qualquer outro arquivo do usuario).
 # Se sobrou backup de um build que falhou, ele e o mais confiavel: reutiliza em vez de recriar.
 $keep = Join-Path $env:TEMP "soundmod-keep"
 if (-not (Test-Path $keep) -and (Test-Path dist\SoundMod)) {
     New-Item -ItemType Directory $keep | Out-Null
-    foreach ($f in "config.json", "clips", "sounds") {
-        if (Test-Path "dist\SoundMod\$f") { Copy-Item "dist\SoundMod\$f" $keep -Recurse }
-    }
+    Get-ChildItem dist\SoundMod | Where-Object { $_.Name -notin "SoundMod.exe", "_internal" } |
+        Copy-Item -Destination $keep -Recurse
 }
 
 $mode = if ($OneFile) { "--onefile" } else { "--onedir" }

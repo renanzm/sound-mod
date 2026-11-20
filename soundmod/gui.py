@@ -1,3 +1,4 @@
+import queue
 import re
 import threading
 import time
@@ -106,6 +107,9 @@ class App(ctk.CTk):
         self.rows = []
         self.clip_active = False
         self.capturing_key = False
+        # threads nunca mexem no Tk: enfileiram aqui e o _tick executa na thread da janela.
+        # (No Python 3.15, after() chamado de outra thread antes do mainloop lanca RuntimeError.)
+        self.ui_queue = queue.SimpleQueue()
 
         self.engine.set_voice(self.cfg["voice_effect"])
         self.ins, self.outs = wasapi_devices()
@@ -255,10 +259,24 @@ class App(ctk.CTk):
             return default
         return value if value and value != LEGACY_NONE else t("none")
 
+    def _post(self, fn):
+        """Executa fn na thread da janela (seguro para chamar de qualquer thread)."""
+        self.ui_queue.put(fn)
+
     def _say(self, msg):
-        self.after(0, lambda: self.status.configure(text=msg))
+        self._post(lambda: self.status.configure(text=msg))
 
     def _tick(self):
+        self.after(100, self._tick)  # reagenda antes: um erro abaixo nao pode parar as atualizacoes
+        while True:
+            try:
+                fn = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception as e:
+                self.report_callback_exception(type(e), e, e.__traceback__)
         for row in self.rows:
             row.tick()
         st = self.engine.state(CLIP)
@@ -267,7 +285,6 @@ class App(ctk.CTk):
         if playing != self.clip_active:
             self.clip_active = playing
             self.clip_key.set_active(playing)
-        self.after(100, self._tick)
 
     def _add_slot(self):
         paths = filedialog.askopenfilenames(filetypes=[(t("audio_files"), AUDIO_GLOB), (t("all_files"), "*.*")])
@@ -349,7 +366,7 @@ class App(ctk.CTk):
                 key = capture_key()
             except Exception:
                 key = ""
-            self.after(0, lambda: self._rebound(kb, setter, key))
+            self._post(lambda: self._rebound(kb, setter, key))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -416,7 +433,7 @@ class App(ctk.CTk):
         except Exception as e:
             self._say(t("clip_open_error", e=e))
             return False
-        self.after(0, lambda: self._show_clip(data, reset_trim))
+        self._post(lambda: self._show_clip(data, reset_trim))
         return True
 
     def _show_clip(self, data, reset_trim):
@@ -462,7 +479,7 @@ class App(ctk.CTk):
                 return self._say(t("sound_save_error", e=e))
             # relativo a pasta do programa: continua valendo se a pasta for copiada/atualizada
             rel = target.relative_to(config.ROOT).as_posix()
-            self.after(0, lambda: self._sound_saved(rel))
+            self._post(lambda: self._sound_saved(rel))
         threading.Thread(target=work, daemon=True).start()
 
     def _sound_saved(self, rel):
