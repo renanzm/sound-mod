@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> **Este projeto foi migrado para Rust: [renanzm/sound-mod-rs](https://github.com/renanzm/sound-mod-rs).**
+> Esta versão em Python não é mais mantida. A nova versão tem todas as funções daqui, mais ordem dos sons, coleções e uma nova interface neon, num único `.exe` sem nada para instalar. Ela lê o mesmo `config.json`: coloque o novo `SoundMod.exe` na pasta desta versão (ou copie o `config.json` e a pasta `sounds\` para o lado dele) e seus sons, teclas e dispositivos são importados na primeira abertura.
+
 <img src="soundmod/assets/icon-256.png" width="96" alt="Sound Mod">
 
 # Sound Mod
