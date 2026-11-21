@@ -26,6 +26,8 @@ if (-not (Test-Path $keep) -and (Test-Path dist\SoundMod)) {
 $mode = if ($OneFile) { "--onefile" } else { "--onedir" }
 .\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --windowed $mode `
     --name SoundMod `
+    --icon soundmod\assets\icon.ico `
+    --add-data "soundmod\assets;soundmod\assets" `
     --collect-all customtkinter `
     --collect-all imageio_ffmpeg `
     --collect-all pyaudiowpatch `

@@ -1,3 +1,5 @@
+<img src="soundmod/assets/icon-256.png" width="96" alt="Sound Mod">
+
 # Sound Mod
 
 **English** | [Português](README.pt-BR.md)

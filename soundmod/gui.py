@@ -2,68 +2,97 @@ import queue
 import re
 import threading
 import time
+import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
 import numpy as np
 
-from . import config, i18n, voice
+from . import config, i18n, theme, voice
 from .codec import SR, encode_mp3
 from .engine import Engine, wasapi_devices
 from .hotkeys import HotkeyManager, capture_key
 from .i18n import t
 from .recorder import LoopbackRecorder, loopback_names
-from .widgets import KeyButton, ScrollFrame, Waveform
+from .widgets import EffectGrid, KeyButton, ScrollFrame, StatusPill, Waveform
 
 AUDIO_GLOB = "*.mp3 *.wav *.ogg *.flac *.m4a *.aac *.wma"
 LEGACY_NONE = "(nenhum)"  # config.json antigos guardavam o texto em vez de ""
 CLIP = "clip"  # id do canal do clipe no engine
+SIDEBAR = 340
 
 
 def mmss(t):
     return f"{int(t // 60)}:{int(t % 60):02d}"
 
 
-def short(name, n=28):
+def short(name, n=30):
     return name if len(name) <= n else name[:n - 1] + "…"
 
 
+def card(master, **kwargs):
+    return ctk.CTkFrame(master, fg_color=theme.CARD, corner_radius=theme.RADIUS_CARD, border_width=1,
+                        border_color=theme.BORDER, **kwargs)
+
+
+def title(master, text, size=17):
+    return ctk.CTkLabel(master, text=text, font=theme.display(size, "bold"), anchor="w")
+
+
+def caption(master, text, **kwargs):
+    return ctk.CTkLabel(master, text=text, font=theme.font(12), text_color=theme.MUTED, anchor="w", **kwargs)
+
+
 class SlotRow:
-    """Linha de um som. O proprio objeto e o id do canal no engine."""
+    """Linha de um som (um 'cartao' na lista). O proprio objeto e o id do canal no engine."""
 
     def __init__(self, app, slot):
         self.app, self.slot = app, slot
         self.dur = 0.0
         self.drag_until = 0.0
         self.active = False
-        p = app.list
+        f = self.frame = ctk.CTkFrame(app.list, fg_color=theme.ITEM, corner_radius=14, border_width=1,
+                                      border_color=theme.ITEM)
+        f.grid_columnconfigure(2, weight=1)
         set_key = lambda k: slot.__setitem__("key", k)
-        self.key = KeyButton(p, "▶", slot["key"], lambda: app._toggle_slot(self),
+        self.key = KeyButton(f, "▶", slot["key"], lambda: app._toggle_slot(self),
                              lambda kb: app._rebind(kb, set_key), lambda kb: app._clear_key(kb, set_key))
-        self.file_btn = ctk.CTkButton(p, text=t("file"), width=78, command=lambda: app._pick(self))
-        self.name = ctk.CTkLabel(p, text=short(Path(slot["path"]).name) or t("no_file"), anchor="w")
-        self.time = ctk.CTkLabel(p, text="-:-- / -:--", width=84, text_color="gray70")
-        self.progress = ctk.CTkSlider(p, from_=0, to=1, width=170, command=self._seek)
+        self.file_btn = theme.icon_button(f, theme.FOLDER, lambda: app._pick(self), color=theme.ITEM_HOVER,
+                                          hover=theme.DIM)
+        self.name = ctk.CTkLabel(f, text=short(Path(slot["path"]).name) or t("no_file"), anchor="w",
+                                 font=theme.font(13, "bold"),
+                                 text_color=theme.TEXT if slot["path"] else theme.MUTED)
+        self.time = ctk.CTkLabel(f, text="-:-- / -:--", width=78, text_color=theme.MUTED, font=theme.font(12))
+        self.progress = ctk.CTkSlider(f, from_=0, to=1, width=140, height=16, command=self._seek)
         self.progress.set(0)
-        self.vol = ctk.CTkSlider(p, from_=0, to=1.5, width=90, command=self._volume)
+        self.vol_icon = ctk.CTkLabel(f, text=theme.VOLUME, font=theme.icons(12), text_color=theme.MUTED, width=16)
+        self.vol = ctk.CTkSlider(f, from_=0, to=1.5, width=76, height=16, command=self._volume,
+                                 progress_color=theme.MUTED)
         self.vol.set(slot["volume"])
-        self.play_btn = ctk.CTkButton(p, text="▶", width=30, command=lambda: app._play_slot(self))
-        self.pause_btn = ctk.CTkButton(p, text="⏸", width=30, command=lambda: app.engine.pause(self))
-        self.stop_btn = ctk.CTkButton(p, text="■", width=30, command=lambda: app.engine.stop(self))
-        self.rm_btn = ctk.CTkButton(p, text="✕", width=30, fg_color="#7a2b2b", hover_color="#a33",
-                                    command=lambda: app._remove_slot(self))
-        self.widgets = [self.key, self.file_btn, self.name, self.time, self.progress, self.vol,
-                        self.play_btn, self.pause_btn, self.stop_btn, self.rm_btn]
-
-    def grid(self, r):
-        for c, w in enumerate(self.widgets):
-            w.grid(row=r, column=c, padx=(4, 2) if c else (4, 6), pady=3,
+        self.play_btn = theme.icon_button(f, theme.PLAY, lambda: app._play_slot(self), color=theme.ITEM_HOVER,
+                                          hover=theme.DIM)
+        self.pause_btn = theme.icon_button(f, theme.PAUSE, lambda: app.engine.pause(self), color=theme.ITEM_HOVER,
+                                           hover=theme.DIM)
+        self.stop_btn = theme.icon_button(f, theme.STOP, lambda: app.engine.stop(self), color=theme.ITEM_HOVER,
+                                          hover=theme.DIM)
+        self.rm_btn = theme.icon_button(f, theme.DELETE, lambda: app._remove_slot(self), color="transparent",
+                                        hover=theme.DANGER_SOFT, text_color=theme.DANGER)
+        widgets = [self.key, self.file_btn, self.name, self.time, self.progress, self.vol_icon, self.vol,
+                   self.play_btn, self.pause_btn, self.stop_btn, self.rm_btn]
+        for c, w in enumerate(widgets):
+            left = 10 if c == 0 else (2 if w in (self.vol, self.pause_btn, self.stop_btn) else 8)
+            w.grid(row=0, column=c, padx=(left, 10 if w is self.rm_btn else 0), pady=8,
                    sticky="ew" if w is self.name else "")
 
+    def grid(self, r):
+        self.frame.grid(row=r, column=0, sticky="ew", pady=4)
+
     def destroy(self):
-        for w in self.widgets:
-            w.destroy()
+        self.frame.destroy()
+
+    def set_name(self, path):
+        self.name.configure(text=short(Path(path).name), text_color=theme.TEXT)
 
     def _seek(self, v):
         self.drag_until = time.monotonic() + 0.4
@@ -89,15 +118,23 @@ class SlotRow:
         if playing != self.active:
             self.active = playing
             self.key.set_active(playing)
+            self.frame.configure(border_color=theme.GREEN if playing else theme.ITEM)
 
 
 class App(ctk.CTk):
     def __init__(self):
+        theme.set_app_id()
+        theme.apply_colors()
         super().__init__()
-        ctk.set_appearance_mode("dark")
+        theme.load_fonts(self)
         self.title("Sound Mod")
-        self.geometry("1040x780")
-        self.minsize(940, 620)
+        self.geometry("1320x850")
+        self.minsize(1200, 780)
+        try:
+            self.iconbitmap(str(theme.ICON))
+        except tk.TclError:
+            pass
+        self.after(50, lambda: theme.style_titlebar(self))
 
         self.cfg = config.load()
         i18n.set_language(self.cfg["language"])
@@ -123,16 +160,117 @@ class App(ctk.CTk):
     # ---------- construcao da UI ----------
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=0, minsize=SIDEBAR)
         self.grid_rowconfigure(2, weight=1)
 
-        dev = ctk.CTkFrame(self)
-        dev.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
-        dev.grid_columnconfigure(1, weight=1)
+        self._build_header()
 
         in_names = [n for _, n in self.ins]
         out_names = [n for _, n in self.outs]
         cable = next((n for n in out_names if "CABLE Input" in n), None)
         self.cable_found = cable is not None
+        if not self.cable_found:
+            ctk.CTkLabel(self, text_color=theme.WARN, wraplength=1100, justify="left", text=t("no_cable"),
+                         font=theme.font(12)).grid(row=1, column=0, columnspan=2, sticky="w", padx=24, pady=(0, 6))
+
+        main = ctk.CTkFrame(self, fg_color="transparent")
+        main.grid(row=2, column=0, sticky="nsew", padx=(20, 8), pady=(0, 8))
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(0, weight=1)
+        side = ctk.CTkFrame(self, fg_color="transparent", width=SIDEBAR)
+        side.grid(row=2, column=1, sticky="nsew", padx=(8, 20), pady=(0, 8))
+        side.grid_columnconfigure(0, weight=1)
+
+        self._build_sounds(main)
+        self._build_clip(main)
+        self._build_devices(side, in_names, out_names, cable)
+        self._build_voice(side)
+
+        self.status = ctk.CTkLabel(self, text=t("ready"), anchor="w", font=theme.font(12), text_color=theme.MUTED)
+        self.status.grid(row=3, column=0, columnspan=2, sticky="ew", padx=24, pady=(0, 12))
+
+    def _build_header(self):
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=20, pady=(16, 12))
+        head.grid_columnconfigure(2, weight=1)
+        scale = ctk.ScalingTracker.get_window_scaling(self)
+        size = min((32, 48, 64), key=lambda s: abs(s - 34 * scale))
+        self._logo = tk.PhotoImage(file=str(theme.ASSETS / f"logo-{size}.png"))
+        tk.Label(head, image=self._logo, bg=theme.BG, bd=0).grid(row=0, column=0, rowspan=2, padx=(4, 12))
+        title(head, "Sound Mod", 22).grid(row=0, column=1, sticky="sw")
+        caption(head, t("tagline")).grid(row=1, column=1, sticky="nw")
+
+        right = ctk.CTkFrame(head, fg_color="transparent")
+        right.grid(row=0, column=3, rowspan=2, sticky="e")
+        self.pill = StatusPill(right)
+        self.pill.grid(row=0, column=0, padx=(0, 10))
+        self.lang_var = ctk.StringVar(value=i18n.LANGUAGES[i18n.current()])
+        ctk.CTkOptionMenu(right, variable=self.lang_var, values=list(i18n.LANGUAGES.values()), width=124,
+                          height=34, corner_radius=17, command=self._on_language).grid(row=0, column=1, padx=(0, 10))
+        stop = ctk.CTkFrame(right, fg_color=theme.DANGER_SOFT, corner_radius=20)
+        stop.grid(row=0, column=2)
+        ctk.CTkLabel(stop, text=t("stop_all"), font=theme.font(12, "bold"), text_color=theme.TEXT
+                     ).grid(row=0, column=0, padx=(14, 6), pady=4)
+        self.stop_key = self._cfg_key_button(stop, "■", "stop_key", self.engine.stop_all, color=theme.DANGER)
+        self.stop_key.grid(row=0, column=1, padx=(0, 6), pady=4)
+
+    def _build_sounds(self, parent):
+        box = card(parent)
+        box.grid(row=0, column=0, sticky="nsew", pady=(0, 12))
+        box.grid_columnconfigure(0, weight=1)
+        box.grid_rowconfigure(1, weight=1)
+        head = ctk.CTkFrame(box, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 6))
+        head.grid_columnconfigure(1, weight=1)
+        title(head, t("sounds")).grid(row=0, column=0, sticky="w")
+        caption(head, t("sounds_hint")).grid(row=0, column=1, sticky="w", padx=14)
+        ctk.CTkButton(head, text=f"{t('add_sound')}", height=34, corner_radius=17, font=theme.font(13, "bold"),
+                      command=self._add_slot, **theme.primary()).grid(row=0, column=2, sticky="e")
+        scroll = ScrollFrame(box)
+        scroll.grid(row=1, column=0, sticky="nsew", padx=(14, 10), pady=(4, 14))
+        self.list = scroll.inner
+        self.list.grid_columnconfigure(0, weight=1)
+        for s in self.cfg["slots"]:
+            self._add_row(s)
+
+    def _build_clip(self, parent):
+        clip = card(parent)
+        clip.grid(row=1, column=0, sticky="ew")
+        clip.grid_columnconfigure(0, weight=1)
+        head = ctk.CTkFrame(clip, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 8))
+        head.grid_columnconfigure(1, weight=1)
+        title(head, t("clip_title")).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(head, text=t("save_as_sound"), height=34, corner_radius=17, font=theme.font(13, "bold"),
+                      command=self._save_as_sound, **theme.primary()).grid(row=0, column=2, sticky="e")
+
+        bar = ctk.CTkFrame(clip, fg_color="transparent")
+        bar.grid(row=1, column=0, sticky="ew", padx=18)
+        caption(bar, t("save_last")).grid(row=0, column=0, padx=(0, 6))
+        self.secs = ctk.CTkEntry(bar, width=44, height=32, justify="center")
+        self.secs.insert(0, str(self.cfg["clip_seconds"]))
+        self.secs.grid(row=0, column=1)
+        caption(bar, t("seconds")).grid(row=0, column=2, padx=(6, 10))
+        self.save_key = self._cfg_key_button(bar, "●", "save_clip_key", self._save_clip)
+        self.save_key.grid(row=0, column=3, padx=(0, 22))
+        caption(bar, t("clip")).grid(row=0, column=4, padx=(0, 6))
+        self.clip_key = self._cfg_key_button(bar, "▶", "play_clip_key", self._toggle_clip)
+        self.clip_key.grid(row=0, column=5, padx=(0, 6))
+        theme.icon_button(bar, theme.PAUSE, lambda: self.engine.pause(CLIP)).grid(row=0, column=6, padx=2)
+        theme.icon_button(bar, theme.STOP, lambda: self.engine.stop(CLIP)).grid(row=0, column=7, padx=2)
+
+        wave_box = ctk.CTkFrame(clip, fg_color=theme.ITEM, corner_radius=14)
+        wave_box.grid(row=2, column=0, sticky="ew", padx=18, pady=(12, 6))
+        wave_box.grid_columnconfigure(0, weight=1)
+        self.wave = Waveform(wave_box, self._clip_range, self._clip_seek)
+        self.wave.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        caption(clip, t("clip_hint")).grid(row=3, column=0, sticky="w", padx=20, pady=(0, 14))
+
+    def _build_devices(self, parent, in_names, out_names, cable):
+        dev = card(parent)
+        dev.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        dev.grid_columnconfigure(0, weight=1)
+        title(dev, t("devices")).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 2))
 
         none = t("none")
         mic = next((n for n in in_names if "micro" in n.lower()), none)
@@ -141,103 +279,54 @@ class App(ctk.CTk):
         self.out_var = ctk.StringVar(value=self._saved_device("output_device", cable or none))
         self.mon_var = ctk.StringVar(value=self._saved_device("monitor_device", phones))
         self.loop_var = ctk.StringVar(value=self.cfg["loopback_device"] or t("default_speaker"))
-
         rows = [
             (t("mic"), self.mic_var, [none] + in_names),
             (t("output"), self.out_var, [none] + out_names),
             (t("monitor"), self.mon_var, [none] + out_names),
             (t("loopback"), self.loop_var, [t("default_speaker")] + self._safe(loopback_names)),
         ]
-        for r, (label, var, values) in enumerate(rows):
-            ctk.CTkLabel(dev, text=label, anchor="w").grid(row=r, column=0, padx=10, pady=4, sticky="w")
-            ctk.CTkOptionMenu(dev, variable=var, values=values, dynamic_resizing=False
-                              ).grid(row=r, column=1, padx=10, pady=4, sticky="ew")
+        r = 1
+        for label, var, values in rows:
+            caption(dev, label).grid(row=r, column=0, sticky="w", padx=20, pady=(4, 1))
+            ctk.CTkOptionMenu(dev, variable=var, values=values, dynamic_resizing=False, height=30,
+                              font=theme.font(12)).grid(row=r + 1, column=0, sticky="ew", padx=18)
+            r += 2
 
-        opts = ctk.CTkFrame(dev, fg_color="transparent")
-        opts.grid(row=4, column=0, columnspan=2, sticky="ew", padx=6, pady=(4, 8))
         self.mix_var = ctk.BooleanVar(value=self.cfg["mix_mic"])
         self.monitor_var = ctk.BooleanVar(value=self.cfg["monitor"])
-        ctk.CTkCheckBox(opts, text=t("mix_mic"), variable=self.mix_var,
-                        command=self._apply_live).pack(side="left", padx=8)
-        ctk.CTkCheckBox(opts, text=t("hear_sounds"), variable=self.monitor_var,
-                        command=self._apply_live).pack(side="left", padx=8)
-        ctk.CTkLabel(opts, text=t("master_volume")).pack(side="left", padx=(16, 4))
-        self.vol_slider = ctk.CTkSlider(opts, from_=0, to=1, width=120, command=lambda v: self._apply_live())
+        for var, key in ((self.mix_var, "mix_mic"), (self.monitor_var, "hear_sounds")):
+            ctk.CTkSwitch(dev, text=t(key), variable=var, command=self._apply_live, font=theme.font(13)
+                          ).grid(row=r, column=0, sticky="w", padx=20, pady=(10 if key == "mix_mic" else 4, 0))
+            r += 1
+        vol = ctk.CTkFrame(dev, fg_color="transparent")
+        vol.grid(row=r, column=0, sticky="ew", padx=20, pady=(10, 0))
+        vol.grid_columnconfigure(1, weight=1)
+        caption(vol, t("master_volume")).grid(row=0, column=0, padx=(0, 10))
+        self.vol_slider = ctk.CTkSlider(vol, from_=0, to=1, height=16, command=lambda v: self._apply_live())
         self.vol_slider.set(self.cfg["master_volume"])
-        self.vol_slider.pack(side="left")
-        ctk.CTkButton(opts, text=t("apply"), width=140, command=self._start_all
-                      ).pack(side="right", padx=8)
-        self.lang_var = ctk.StringVar(value=i18n.LANGUAGES[i18n.current()])
-        ctk.CTkOptionMenu(opts, variable=self.lang_var, values=list(i18n.LANGUAGES.values()), width=110,
-                          command=self._on_language).pack(side="right", padx=8)
+        self.vol_slider.grid(row=0, column=1, sticky="ew")
+        ctk.CTkButton(dev, text=t("apply"), height=38, corner_radius=19, font=theme.font(13, "bold"),
+                      command=self._start_all, **theme.primary()).grid(row=r + 1, column=0, sticky="ew",
+                                                                     padx=18, pady=(12, 14))
 
-        fx = ctk.CTkFrame(dev, fg_color="transparent")
-        fx.grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 8))
-        ctk.CTkLabel(fx, text=t("voice")).pack(side="left", padx=(8, 6))
-        self.fx_names = {t(f"fx_{name}"): name for name in voice.EFFECTS}
-        current = self.cfg["voice_effect"] if self.cfg["voice_effect"] in voice.EFFECTS else "normal"
-        self.fx_var = ctk.StringVar(value=t(f"fx_{current}"))
-        ctk.CTkSegmentedButton(fx, values=list(self.fx_names), variable=self.fx_var,
-                               command=self._on_voice).pack(side="left", padx=4)
-        self.hear_self_var = ctk.BooleanVar(value=self.cfg["hear_self"])
-        ctk.CTkCheckBox(fx, text=t("hear_self"), variable=self.hear_self_var,
-                        command=self._apply_live).pack(side="left", padx=12)
-
-        if not self.cable_found:
-            ctk.CTkLabel(
-                self, text_color="#e6a23c", wraplength=780, justify="left", text=t("no_cable"),
-            ).grid(row=1, column=0, sticky="w", padx=14, pady=2)
-
-        # sons
-        box = ctk.CTkFrame(self)
-        box.grid(row=2, column=0, sticky="nsew", padx=12, pady=6)
+    def _build_voice(self, parent):
+        box = card(parent)
+        box.grid(row=1, column=0, sticky="ew")
         box.grid_columnconfigure(0, weight=1)
-        box.grid_rowconfigure(1, weight=1)
-        head = ctk.CTkFrame(box, fg_color="transparent")
-        head.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 0))
-        ctk.CTkLabel(head, text=t("sounds"), font=ctk.CTkFont(size=15, weight="bold")).pack(side="left", padx=6)
-        ctk.CTkLabel(head, text=t("sounds_hint"), text_color="gray60").pack(side="left", padx=10)
-        ctk.CTkButton(head, text=t("add_sound"), width=130, command=self._add_slot).pack(side="right")
-        scroll = ScrollFrame(box)
-        scroll.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
-        self.list = scroll.inner
-        self.list.grid_columnconfigure(2, weight=1)
-        for s in self.cfg["slots"]:
-            self._add_row(s)
+        title(box, t("voice")).grid(row=0, column=0, sticky="w", padx=18, pady=(14, 6))
+        current = self.cfg["voice_effect"] if self.cfg["voice_effect"] in voice.EFFECTS else "normal"
+        self.fx_grid = EffectGrid(box, [(name, t(f"fx_{name}")) for name in voice.EFFECTS], current,
+                                  self._on_voice)
+        self.fx_grid.grid(row=1, column=0, sticky="ew", padx=15)
+        self.hear_self_var = ctk.BooleanVar(value=self.cfg["hear_self"])
+        ctk.CTkSwitch(box, text=t("hear_self"), variable=self.hear_self_var, command=self._apply_live,
+                      font=theme.font(13)).grid(row=2, column=0, sticky="w", padx=20, pady=(10, 14))
 
-        # clipe do audio do PC
-        clip = ctk.CTkFrame(self)
-        clip.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
-        clip.grid_columnconfigure(9, weight=1)
-        ctk.CTkLabel(clip, text=t("save_last")).grid(row=0, column=0, padx=(10, 4), pady=8)
-        self.secs = ctk.CTkEntry(clip, width=40)
-        self.secs.insert(0, str(self.cfg["clip_seconds"]))
-        self.secs.grid(row=0, column=1, padx=2)
-        ctk.CTkLabel(clip, text=t("seconds")).grid(row=0, column=2, padx=(2, 6))
-        self.save_key = self._cfg_key_button(clip, "●", "save_clip_key", self._save_clip)
-        self.save_key.grid(row=0, column=3, padx=(0, 16))
-        ctk.CTkLabel(clip, text=t("clip")).grid(row=0, column=4, padx=(0, 4))
-        self.clip_key = self._cfg_key_button(clip, "▶", "play_clip_key", self._toggle_clip)
-        self.clip_key.grid(row=0, column=5, padx=(0, 4))
-        ctk.CTkButton(clip, text="⏸", width=30, command=lambda: self.engine.pause(CLIP)).grid(row=0, column=6, padx=2)
-        ctk.CTkButton(clip, text="■", width=30, command=lambda: self.engine.stop(CLIP)).grid(row=0, column=7, padx=2)
-        ctk.CTkButton(clip, text=t("save_as_sound"), width=130, command=self._save_as_sound
-                      ).grid(row=0, column=8, padx=(10, 2))
-        ctk.CTkLabel(clip, text=t("stop_all")).grid(row=0, column=10, padx=(0, 4))
-        self.stop_key = self._cfg_key_button(clip, "■", "stop_key", self.engine.stop_all)
-        self.stop_key.grid(row=0, column=11, padx=(0, 10))
-        self.wave = Waveform(clip, self._clip_range, self._clip_seek)
-        self.wave.grid(row=1, column=0, columnspan=12, sticky="ew", padx=10, pady=(0, 4))
-        ctk.CTkLabel(clip, text_color="gray60", text=t("clip_hint")).grid(
-            row=2, column=0, columnspan=12, sticky="w", padx=10, pady=(0, 6))
-
-        self.status = ctk.CTkLabel(self, text=t("ready"), anchor="w")
-        self.status.grid(row=4, column=0, sticky="ew", padx=14, pady=(2, 10))
-
-    def _cfg_key_button(self, parent, icon, cfg_key, action):
+    def _cfg_key_button(self, parent, icon, cfg_key, action, color=theme.ITEM_HOVER):
         set_key = lambda k: self.cfg.__setitem__(cfg_key, k)
         return KeyButton(parent, icon, self.cfg[cfg_key], action,
-                         lambda kb: self._rebind(kb, set_key), lambda kb: self._clear_key(kb, set_key))
+                         lambda kb: self._rebind(kb, set_key), lambda kb: self._clear_key(kb, set_key),
+                         color=color)
 
     def _add_row(self, slot):
         row = SlotRow(self, slot)
@@ -263,8 +352,13 @@ class App(ctk.CTk):
         """Executa fn na thread da janela (seguro para chamar de qualquer thread)."""
         self.ui_queue.put(fn)
 
+    def _set_status(self, msg):
+        # uma linha so: mensagens de erro do ffmpeg tem varias e esticariam a janela
+        msg = " ".join(str(msg).split())
+        self.status.configure(text=msg if len(msg) <= 180 else msg[:179] + "…")
+
     def _say(self, msg):
-        self._post(lambda: self.status.configure(text=msg))
+        self._post(lambda: self._set_status(msg))
 
     def _tick(self):
         self.after(100, self._tick)  # reagenda antes: um erro abaixo nao pode parar as atualizacoes
@@ -285,6 +379,7 @@ class App(ctk.CTk):
         if playing != self.clip_active:
             self.clip_active = playing
             self.clip_key.set_active(playing)
+        self.pill.set(self.engine.running)
 
     def _add_slot(self):
         paths = filedialog.askopenfilenames(filetypes=[(t("audio_files"), AUDIO_GLOB), (t("all_files"), "*.*")])
@@ -303,7 +398,7 @@ class App(ctk.CTk):
             self.cfg["slots"].append(slot)
             row = self._add_row(slot)
         row.slot["path"] = path
-        row.name.configure(text=short(Path(path).name))
+        row.set_name(path)
         self.engine.invalidate(config.resolve(path))
         threading.Thread(target=self._load_slot, args=(row, True), daemon=True).start()
         return row
@@ -322,12 +417,15 @@ class App(ctk.CTk):
         if not path:
             return
         row.slot["path"] = path
-        row.name.configure(text=short(Path(path).name))
+        row.set_name(path)
         self.engine.invalidate(config.resolve(path))
         threading.Thread(target=self._load_slot, args=(row,), daemon=True).start()
 
     def _load_slot(self, row, quiet=False):
         path = row.slot["path"]
+        if not config.resolve(path).exists():
+            self._say(t("file_missing", name=Path(path).name))
+            return False
         try:
             self.engine.set_sound(row, config.resolve(path), row.slot["volume"])
             if not quiet:
@@ -496,12 +594,11 @@ class App(ctk.CTk):
         self._say(t("clip_playing" if self.engine.toggle(CLIP) else "clip_stopped"))
 
     # ---------- engine ----------
-    def _on_voice(self, label):
-        name = self.fx_names[label]
+    def _on_voice(self, name):
         self.cfg["voice_effect"] = name
         self.engine.set_voice(name)
         config.save(self.cfg)
-        self._say(t("voice_on", name=label))
+        self._say(t("voice_on", name=t(f"fx_{name}")))
 
     def _apply_live(self):
         self.engine.hear_self = self.hear_self_var.get()
@@ -565,7 +662,7 @@ class App(ctk.CTk):
         self._register_hotkeys()
         config.save(self.cfg)
         self._load_missing()
-        self.status.configure(text=" | ".join(msgs))
+        self._set_status(" | ".join(msgs))
 
     def _register_hotkeys(self):
         mapping = [(row.slot["key"], (lambda row=row: self._toggle_slot(row))) for row in self.rows]

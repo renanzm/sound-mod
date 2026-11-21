@@ -55,7 +55,9 @@ sound-mod/
     ├── recorder.py         # loopback + buffer circular + salvar mp3
     ├── hotkeys.py          # registro de hotkeys globais e captura de tecla
     ├── i18n.py             # textos em cada idioma, t(chave), detecção do idioma do Windows
-    ├── widgets.py          # ScrollFrame, KeyButton (botão dividido), Waveform
+    ├── theme.py            # identidade visual: paleta, fontes, glifos, ícone, barra de título
+    ├── widgets.py          # ScrollFrame, KeyButton, EffectGrid, StatusPill, Waveform
+    ├── assets/             # icon.ico (janela e .exe), icon-256.png (README), logo-32/48/64.png (cabeçalho)
     └── gui.py              # interface (App, SlotRow)
 ```
 
@@ -125,19 +127,30 @@ Classe `LoopbackRecorder`.
 - Callbacks chegam na thread do `keyboard`, nunca na da GUI.
 
 ### 3.6 `gui.py`
-- `App(ctk.CTk)`: seções de dispositivos, lista de slots, área do clipe e barra de status.
-- **`SlotRow`** (uma por slot, e é o id do canal no engine): `KeyButton` (▶ toca / ✎ muda a tecla), "Arquivo...", nome, tempo `m:ss / m:ss`, slider de progresso (arrastar = `seek`), slider de volume (0–1,5, ao vivo), ▶ ⏸ ■ e ✕.
-- **Linha de voz** (no quadro de dispositivos): `CTkSegmentedButton` com os efeitos (`fx_names` mapeia o texto traduzido para o nome interno) e a caixa "Ouvir minha voz".
-- **Área do clipe:** segundos + `KeyButton` de salvar (●), `KeyButton` do clipe (▶) com ⏸ ■, "Salvar como som", `KeyButton` de parar tudo e a `Waveform` com o corte.
-- **`_tick`** (a cada 100 ms, thread da GUI): lê `engine.state` de cada canal e atualiza tempo, progresso, cursor da onda e a cor verde do botão que está tocando. Enquanto o usuário arrasta o progresso, a atualização daquele slider pausa por 0,4 s para não brigar com o mouse.
+- `App(ctk.CTk)`: cabeçalho (logo, "Ao vivo", idioma, parar tudo), coluna principal com os cards **Sons** e **Clipe do áudio do PC**, painel lateral (`SIDEBAR` = 340 px) com **Dispositivos** e **Efeito de voz**, e barra de status. `_build` chama `_build_header`, `_build_sounds`, `_build_clip`, `_build_devices` e `_build_voice`.
+- **`SlotRow`** (uma por slot, e é o id do canal no engine): um cartão (`frame`) com `KeyButton`, botão de arquivo, nome, tempo `m:ss / m:ss`, progresso (arrastar = `seek`), volume (0–1,5, ao vivo), ▶ ⏸ ■ e lixeira. A borda fica verde enquanto toca.
+- **Card de voz:** `EffectGrid` 3×3 com os efeitos (devolve o nome interno, não o texto traduzido) e o switch "Ouvir minha voz".
+- **Card do clipe:** "Salvar como som" no título; segundos + `KeyButton` de salvar (●), `KeyButton` do clipe (▶) com ⏸ ■; e a `Waveform` com o corte. O "Parar tudo" fica no cabeçalho.
+- **`_tick`** (a cada 100 ms, thread da GUI): executa as tarefas da fila `ui_queue`, lê `engine.state` de cada canal e atualiza tempo, progresso, cursor da onda, a cor verde do que está tocando e o indicador "Ao vivo". Enquanto o usuário arrasta o progresso, a atualização daquele slider pausa por 0,4 s para não brigar com o mouse.
 
 ### 3.7 `widgets.py`
 - `ScrollFrame`: Canvas + `CTkScrollbar` próprio. **Não usar `CTkScrollableFrame`**, que trava no Python 3.15.
-- `KeyButton`: três botões lado a lado. O principal (`ícone + TECLA`) executa a ação; o ✎ chama a captura de tecla; o ⌫ remove a tecla (fica desativado quando não há tecla). `capturing()`, `set_key()`, `set_active()`.
-- `Waveform` (`tk.Canvas`): reduz o áudio a ~2000 picos e desenha uma coluna por pixel, normalizada. O trecho selecionado fica em azul, o resto em cinza. As alças laranjas (início/fim) são arrastáveis e chamam `on_range(ini, fim)` ao soltar; clicar no meio chama `on_seek(t)`. O cursor branco é movido por `set_pos(t)` sem redesenhar a onda.
+- `KeyButton`: pílula (`ícone + TECLA`) que executa a ação, seguida dos ícones ✎ (capturar tecla) e ⌫ (remover; desativado quando não há tecla). `capturing()`, `set_key()`, `set_active()` (verde enquanto toca).
+- `EffectGrid`: grade de pílulas com uma selecionada (laranja). `select(valor, notify)`.
+- `StatusPill`: bolinha verde "Ao vivo" ou cinza "Parado", conforme `engine.running`.
+- `Waveform` (`tk.Canvas`): reduz o áudio a ~2000 picos e desenha barras arredondadas a cada 5 px, normalizadas. O trecho selecionado fica em laranja, o resto em cinza. As alças brancas (início/fim) são arrastáveis e chamam `on_range(ini, fim)` ao soltar; clicar no meio chama `on_seek(t)`. O cursor é movido por `set_pos(t)` sem redesenhar a onda.
 - **Cuidado:** nunca criar atributos ou métodos com nomes do tkinter em subclasses de widgets (`master`, `children`, `tk`, `_unbind`, etc.). Atribuir `master` já gerou loop infinito em `_root`, e um método `_unbind` no `App` já quebrou o `unbind_all`.
-- Toda atualização de widget vinda de outra thread passa por `self.after(0, ...)` (`_say`).
+- **Threads nunca mexem no Tk.** Atualizações vindas de outras threads vão por `_post(fn)` para a fila `ui_queue`, que o `_tick` executa. Chamar `after()` de outra thread antes do `mainloop` lança `RuntimeError` no Python 3.15 e mata a thread em silêncio.
+- A barra de status (`_set_status`) mostra sempre uma linha só: mensagens de várias linhas (erros do ffmpeg) esticariam a janela.
 - `_start_all()` (botão "Aplicar / Reiniciar" e início automático): lê a UI → `cfg`, reinicia `Engine` e `Recorder`, registra hotkeys, salva config e pré-carrega os arquivos em threads.
+
+### 3.7.1 `theme.py`
+- **Paleta** (constantes): fundo `BG` carvão quente, cards `CARD`, linhas e botões neutros `ITEM`, destaque `ACCENT` laranja, `GREEN` para o que está tocando, `DANGER` para remover e parar tudo. Nenhuma cor fica escrita direto na interface.
+- `apply_colors()` ajusta o tema padrão do customtkinter **antes** de criar a janela; `load_fonts(root)` escolhe Segoe UI Variable (Windows 11) ou Segoe UI, e Segoe Fluent Icons ou Segoe MDL2 Assets para os ícones.
+- **Ícones** são glifos da fonte de ícones do Windows (`PLAY`, `PAUSE`, `STOP`, `EDIT`, `CLEAR`, `DELETE`, `FOLDER`...), usados com `icon_button()`. Nada de imagens: ficam nítidos em qualquer escala.
+- `set_app_id()` faz a barra de tarefas usar o ícone do app ao rodar do código (senão aparece o do Python); `style_titlebar()` pinta a barra de título na cor do fundo no Windows 11.
+- **Cuidado:** `CTkButton` tem largura padrão de 140 px. Botões em grade com `sticky="ew"` precisam de `width` pequeno, senão forçam o painel a crescer (isso já empurrou o painel lateral e escondeu os nomes dos sons).
+- **Ícone do app:** `assets/icon.ico` (16 a 256 px) é usado pela janela (`iconbitmap`) e pelo `.exe` (`--icon` no `build.ps1`, que também leva a pasta `assets` com `--add-data`). Foi gerado com Pillow fora do projeto, para o Pillow não entrar no executável.
 
 ### 3.8 `i18n.py`
 - `TEXTS[idioma][chave]` guarda todos os textos da interface e das mensagens; `t("chave", valor=...)` devolve o texto no idioma atual. O idioma é global ao módulo.
